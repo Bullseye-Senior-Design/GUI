@@ -41,11 +41,11 @@ from PIL import Image
 # ── Package path so Comms/Robot imports resolve from project root ─────────────
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from Models.ControllerData import ControllerData
-from Models.StateData import State, StateData
-from Models.BatteryData import BatteryData
-from Models.DataPacket import DataPacket
-from Constants import Constants
+from Comms.ControllerData import ControllerData
+from Comms.StateData import State, StateData
+from Comms.BatteryData import BatteryData
+from Comms.DataPacket import DataPacket
+from Robot.Constants import Constants
 
 # ============================================================
 # APP-LEVEL CONSTANTS  –  hardware and timing
@@ -55,6 +55,7 @@ WINDOW_H   = 800
 
 UPDATE_HZ  = Constants.controller_update_rate   # seconds per cycle (~20 Hz = 0.05 s)
 DEADZONE   = Constants.controller_deadzone       # joystick axis dead-band
+RECORD_FINISH_TIMEOUT = 10.0                    # seconds to wait for Pi route_created ack
 PORT       = Constants.controller_serial_port    # XBee USB serial port
 BAUD       = Constants.serial_baud_rate          # XBee baud rate
 
@@ -815,6 +816,7 @@ class RecordRouteScreen(BaseScreen):
         super().__init__(parent, app, app_state)
 
         self._waiting_for_confirm = False   # True after FINISH pressed
+        self._finish_timeout_id: str | None = None
 
         # ── Center content ────────────────────────────────────────────────
         center = ctk.CTkFrame(self, fg_color="transparent")
@@ -868,6 +870,7 @@ class RecordRouteScreen(BaseScreen):
         if self._waiting_for_confirm:
             return
         self._waiting_for_confirm = True
+        self._cancel_finish_timeout()
         enqueue_packet(self.state, "record_finish")
         self._status_label.configure(
             text="⏳ SAVING ROUTE...\nWaiting for Pi confirmation",
@@ -876,9 +879,34 @@ class RecordRouteScreen(BaseScreen):
         # Disable both buttons while waiting so the user cannot double-send
         self._finish_btn.configure(state="disabled")
         self._cancel_btn.configure(state="disabled")
+        self._finish_timeout_id = self.after(
+            int(RECORD_FINISH_TIMEOUT * 1000),
+            self._on_finish_timeout,
+        )
+
+    def _cancel_finish_timeout(self):
+        if self._finish_timeout_id is not None:
+            try:
+                self.after_cancel(self._finish_timeout_id)
+            except Exception:
+                pass
+            self._finish_timeout_id = None
+
+    def _on_finish_timeout(self):
+        self._finish_timeout_id = None
+        if not self._waiting_for_confirm:
+            return
+        self._waiting_for_confirm = False
+        self._status_label.configure(
+            text="SAVE TIMED OUT\nCheck connection and try again",
+            text_color=C_DANGER,
+        )
+        self._finish_btn.configure(state="normal")
+        self._cancel_btn.configure(state="normal")
 
     def _cancel(self):
         """Discard the in-progress route and return to the path menu."""
+        self._cancel_finish_timeout()
         enqueue_packet(self.state, "record_cancel")
         enqueue_state(self.state, State.DISABLED)
         with self.state.lock:
@@ -895,6 +923,7 @@ class RecordRouteScreen(BaseScreen):
             while not self.state.event_queue.empty():
                 event = self.state.event_queue.get_nowait()
                 if event.get("type") == "route_created":
+                    self._cancel_finish_timeout()
                     with self.state.lock:
                         self.state.joystick_active = False
                     route_id = event.get("route_id")
