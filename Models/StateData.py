@@ -7,6 +7,8 @@ class State(Enum):
     AUTONOMOUS = 1
     TELEOP = 2
     TEST = 3
+    RETURN_TO_HOME = 4
+    RECORD_PATH = 5
 
 class StateData(BaseModel):
     state: State

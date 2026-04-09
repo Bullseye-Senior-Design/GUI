@@ -860,7 +860,7 @@ class RecordRouteScreen(BaseScreen):
         'record_start' so the Pi enables localization and begins collecting
         path points. Opens the joystick stream so the user can drive.
         """
-        enqueue_state(self.state, State.TELEOP)
+        enqueue_state(self.state, State.RECORD_PATH)
         enqueue_packet(self.state, "record_start")
         with self.state.lock:
             self.state.joystick_active = True
