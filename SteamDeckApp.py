@@ -41,11 +41,11 @@ from PIL import Image
 # ── Package path so Comms/Robot imports resolve from project root ─────────────
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from Comms.ControllerData import ControllerData
-from Comms.StateData import State, StateData
-from Comms.BatteryData import BatteryData
-from Comms.DataPacket import DataPacket
-from Robot.Constants import Constants
+from Models.ControllerData import ControllerData
+from Models.StateData import State, StateData
+from Models.BatteryData import BatteryData
+from Models.DataPacket import DataPacket
+from Constants import Constants
 
 # ============================================================
 # APP-LEVEL CONSTANTS  –  hardware and timing

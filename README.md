@@ -5,3 +5,11 @@ create with this:
     source .venv/bin/activate
     pip install -r requirements.txt
 ```
+
+# start up script
+running startup.sh starts up the GUI python program
+
+In order to get the program to start up on boot up of the steam deck
+- Open autostart on the steam deck 
+- click add new
+- select the startup.sh file
