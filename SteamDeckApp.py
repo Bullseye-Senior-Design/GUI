@@ -1932,21 +1932,24 @@ class KFXSettingsScreen(BaseScreen):
 
 class OnScreenKeyboard:
     """
-    Compact on-screen keyboard placed as a full-screen dim overlay.
-    Writes characters directly into the provided CTkEntry widget.
+    Compact keyboard card that slides up from the bottom of the screen.
+    Parented directly to the calling screen — no full-screen overlay needed.
+
+    A live text preview at the top of the card shows what has been typed
+    so the user can always see their input regardless of screen layout.
 
     Navigation:
-      D-pad left/right  – move between keys in current row
+      D-pad left/right  – move between keys in current row (wraps)
       D-pad up/down     – move between rows (col clamped to row width)
       btn_A (×)         – press highlighted key
       Touch             – tap any key directly
 
-    Key layout (4 main rows + SPACE/DONE bottom row):
+    Key layout:
       1 2 3 4 5 6 7 8 9 0
       Q W E R T Y U I O P
       A S D F G H J K L ⌫
       Z X C V B N M . - _
-      [    SPACE    ] [DONE]
+      [      SPACE      ] [DONE]
     """
 
     _ROWS = [
@@ -1955,8 +1958,8 @@ class OnScreenKeyboard:
         list("ASDFGHJKL⌫"),
         list("ZXCVBNM.-_"),
     ]
-    _KEY_W = 108
-    _KEY_H = 62
+    _KEY_W = 104
+    _KEY_H = 56
     _PAD   = 4
 
     def __init__(self, parent: ctk.CTkFrame, app_state: AppState,
@@ -1966,27 +1969,23 @@ class OnScreenKeyboard:
         self._on_done = on_done
         self._visible = False
 
-        # Navigation cursor (row into _ROWS; len(_ROWS) = bottom SPACE/DONE row)
+        # Navigation cursor (row into _ROWS; len(_ROWS) = SPACE/DONE row)
         self._row = 0
         self._col = 0
 
-        # Dpad / btn_A edge-detection (press fires once per physical press)
+        # D-pad / btn_A edge-detection — each physical press fires exactly once
         self._prev_up    = False
         self._prev_down  = False
         self._prev_left  = False
         self._prev_right = False
         self._prev_a     = False
 
-        # Widget refs: (row, col) tuples for main grid; "SPC" / "DONE" for bottom row
+        # Widget refs: (row, col) for main grid; "SPC"/"DONE" for bottom row
         self._btns: dict = {}
 
-        # ── Dim overlay covers the entire parent frame ────────────────────
-        self._overlay = tk.Frame(parent, bg="#000000")
-        self._overlay.place_forget()
-
-        # ── Keyboard card sits at the bottom of the overlay ───────────────
-        self._card = ctk.CTkFrame(self._overlay, fg_color=C_SURFACE, corner_radius=16)
-        self._card.place(relx=0.5, rely=1.0, anchor="s", x=0, y=-8)
+        # Card placed directly on parent at the bottom — not shown until show()
+        self._card = ctk.CTkFrame(parent, fg_color="#1e1e1e", corner_radius=16,
+                                   border_width=2, border_color=C_PRIMARY)
 
         self._build()
         self._highlight()
@@ -1994,8 +1993,22 @@ class OnScreenKeyboard:
     # ── Build ─────────────────────────────────────────────────────────────
 
     def _build(self):
+        # ── Typed-text preview bar ────────────────────────────────────────
+        preview = ctk.CTkFrame(self._card, fg_color=C_BG, corner_radius=8)
+        preview.pack(fill="x", padx=12, pady=(10, 6))
+
+        ctk.CTkLabel(preview, text="Typing:",
+                     font=("Arial", 14), text_color=C_MUTED,
+                     anchor="w").pack(side="left", padx=(10, 6), pady=8)
+
+        self._display = ctk.CTkLabel(preview, text="",
+                                      font=("Arial Bold", 20),
+                                      text_color=C_TERTIARY, anchor="w")
+        self._display.pack(side="left", fill="x", expand=True, pady=8)
+
+        # ── Key grid ─────────────────────────────────────────────────────
         grid_frame = ctk.CTkFrame(self._card, fg_color="transparent")
-        grid_frame.pack(padx=12, pady=(12, 6))
+        grid_frame.pack(padx=10, pady=(0, 4))
 
         for r, row_keys in enumerate(self._ROWS):
             for c, key in enumerate(row_keys):
@@ -2005,11 +2018,11 @@ class OnScreenKeyboard:
                     text=key,
                     width=self._KEY_W,
                     height=self._KEY_H,
-                    font=("Arial Bold", 20),
+                    font=("Arial Bold", 18),
                     fg_color=C_DANGER if is_back else C_PRIMARY,
                     hover_color="#991a00" if is_back else C_SECONDARY,
                     text_color=C_TEXT,
-                    corner_radius=8,
+                    corner_radius=6,
                     command=lambda k=key: self._press(k),
                 )
                 btn.grid(row=r, column=c,
@@ -2018,18 +2031,17 @@ class OnScreenKeyboard:
 
         # ── Bottom row: SPACE (wide) + DONE ──────────────────────────────
         bottom_frame = ctk.CTkFrame(self._card, fg_color="transparent")
-        bottom_frame.pack(padx=12, pady=(0, 12))
+        bottom_frame.pack(padx=10, pady=(0, 10))
 
-        # SPACE spans ~7 key widths; DONE spans ~3
         spc_w  = self._KEY_W * 7 + self._PAD * 6
         done_w = self._KEY_W * 3 + self._PAD * 2
 
         self._btns["SPC"] = ctk.CTkButton(
             bottom_frame, text="SPACE",
             width=spc_w, height=self._KEY_H,
-            font=("Arial Bold", 18),
+            font=("Arial Bold", 16),
             fg_color=C_PRIMARY, hover_color=C_SECONDARY,
-            text_color=C_TEXT, corner_radius=8,
+            text_color=C_TEXT, corner_radius=6,
             command=lambda: self._press("SPC"),
         )
         self._btns["SPC"].pack(side="left", padx=self._PAD // 2)
@@ -2037,9 +2049,9 @@ class OnScreenKeyboard:
         self._btns["DONE"] = ctk.CTkButton(
             bottom_frame, text="DONE",
             width=done_w, height=self._KEY_H,
-            font=("Arial Bold", 18),
+            font=("Arial Bold", 16),
             fg_color=C_SECONDARY, hover_color=C_TERTIARY,
-            text_color=C_TEXT, corner_radius=8,
+            text_color=C_TEXT, corner_radius=6,
             command=lambda: self._press("DONE"),
         )
         self._btns["DONE"].pack(side="left", padx=self._PAD // 2)
@@ -2047,7 +2059,7 @@ class OnScreenKeyboard:
     # ── Highlight ─────────────────────────────────────────────────────────
 
     def _highlight(self):
-        """Gold-highlight the current cursor key; restore all others."""
+        """Gold-highlight the cursor key; restore all others to defaults."""
         is_bottom = self._row == len(self._ROWS)
 
         for (r, c), btn in [(k, v) for k, v in self._btns.items()
@@ -2059,12 +2071,10 @@ class OnScreenKeyboard:
             else:
                 btn.configure(fg_color=C_TERTIARY if is_cur else C_PRIMARY)
 
-        spc_cur  = is_bottom and self._col == 0
-        done_cur = is_bottom and self._col == 1
         self._btns["SPC"].configure(
-            fg_color=C_TERTIARY if spc_cur else C_PRIMARY)
+            fg_color=C_TERTIARY if (is_bottom and self._col == 0) else C_PRIMARY)
         self._btns["DONE"].configure(
-            fg_color=C_TERTIARY if done_cur else C_SECONDARY)
+            fg_color=C_TERTIARY if (is_bottom and self._col == 1) else C_SECONDARY)
 
     # ── Key press ─────────────────────────────────────────────────────────
 
@@ -2077,25 +2087,29 @@ class OnScreenKeyboard:
             self._entry.insert("end", " ")
         elif key == "DONE":
             self.hide()
+            return
         else:
             self._entry.insert("end", key)
+        # Keep preview in sync after every keystroke
+        self._display.configure(text=self._entry.get())
 
     # ── Visibility ────────────────────────────────────────────────────────
 
     def show(self):
-        self._overlay.place(x=0, y=0, relwidth=1.0, relheight=1.0)
-        self._overlay.lift()
-        self._overlay.configure(bg="#00000099")
+        # Sync preview to whatever is already in the entry (e.g. initial_name)
+        self._display.configure(text=self._entry.get())
+        self._card.place(relx=0.5, rely=1.0, anchor="s", x=0, y=-10)
+        self._card.lift()
         self._visible = True
-        self._poll()
+        self._poll()   # Start gamepad polling — must be after _visible = True
 
     def hide(self):
-        self._overlay.place_forget()
+        self._card.place_forget()
         self._visible = False
         if self._on_done:
             self._on_done()
 
-    # ── D-pad polling ─────────────────────────────────────────────────────
+    # ── D-pad polling (50 ms loop, runs only while keyboard is visible) ───
 
     def _poll(self):
         if not self._visible:
@@ -2110,7 +2124,7 @@ class OnScreenKeyboard:
         right = bool(ctrl.dpad_right)
         a_btn = bool(ctrl.btn_A)
 
-        total_rows = len(self._ROWS) + 1  # +1 for SPACE/DONE row
+        total_rows = len(self._ROWS) + 1   # +1 for SPACE/DONE row
 
         if right and not self._prev_right:
             max_col = 1 if self._row == len(self._ROWS) else len(self._ROWS[self._row]) - 1
@@ -2125,7 +2139,7 @@ class OnScreenKeyboard:
         if down and not self._prev_down:
             self._row = (self._row + 1) % total_rows
             if self._row == len(self._ROWS):
-                # Entering SPACE/DONE row: proportionally pick SPACE or DONE
+                # Map proportionally: cols 0–6 → SPACE, 7–9 → DONE
                 self._col = 0 if self._col <= 6 else 1
             else:
                 self._col = min(self._col, len(self._ROWS[self._row]) - 1)
@@ -2152,7 +2166,7 @@ class OnScreenKeyboard:
         self._prev_a     = a_btn
 
         try:
-            self._overlay.after(50, self._poll)
+            self._card.after(50, self._poll)
         except Exception:
             pass   # Widget destroyed on navigation – stop silently
 
