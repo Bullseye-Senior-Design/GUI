@@ -1,14 +1,6 @@
 Remove as we finish thingys
 ---------------------------
-1. Path Creation logic 
-- take route and save it to JSON file
-2. Path Management logic
-- Add option to remove route
-- Add option to rename route
-3. GUI e-stop
-- little box in the bottom left of the screen for e-stop
-- it will send the user back to the homescreen and state change to 0 or disabled
-- it will also print a message for the user at the top of the gui for them to click free drive to continue
+
 4. Battery Icons
 - Update them both not to be emojis if we can make them progress bars but distiguisable so maybe a outline bull
 - Controller outline that fills
@@ -48,3 +40,14 @@ Controller stuffs
 3. Cursor issues
 - Figure out how to get the right stick to stop running the damn mouse
 - orrr remove highlighting until you hit a button so we don't even know and Michael doesn't cry
+
+Finished: wait what....
+1. Path Creation logic 
+- take route and save it to JSON file
+2. Path Management logic
+- Add option to remove route
+- Add option to rename route
+3. GUI e-stop
+- little box in the bottom left of the screen for e-stop
+- it will send the user back to the homescreen and state change to 0 or disabled
+- it will also print a message for the user at the top of the gui for them to click free drive to continue
