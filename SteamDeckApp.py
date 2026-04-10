@@ -10,7 +10,7 @@
 #   Main Thread     – CustomTkinter mainloop; all UI draws and callbacks
 #   JoystickThread  – polls pygame joystick at ~20 Hz, writes to AppState
 #   SerialTXThread  – drains tx_queue and sends joystick deltas over XBee
-#   SerialRXThread  – reads inbound packets (battery, route_created events)
+#   SerialRXThread  – reads inbound packets (battery, path_created events)
 #
 # LOCAL STORAGE:
 #   routes.json     – maps route_id (int) → user-given name (str)
@@ -55,7 +55,7 @@ WINDOW_H   = 800
 
 UPDATE_HZ  = Constants.controller_update_rate   # seconds per cycle (~20 Hz = 0.05 s)
 DEADZONE   = Constants.controller_deadzone       # joystick axis dead-band
-RECORD_FINISH_TIMEOUT = 10.0                    # seconds to wait for Pi route_created ack
+RECORD_FINISH_TIMEOUT = 10.0                    # seconds to wait for Pi path_created ack
 PORT       = Constants.controller_serial_port    # XBee USB serial port
 BAUD       = Constants.serial_baud_rate          # XBee baud rate
 
@@ -203,7 +203,7 @@ class AppState:
         self.tx_queue: queue.Queue = queue.Queue()
 
         # ── Inbound event queue (SerialRXThread → GUI) ────────────────────
-        # Each item is a plain dict e.g. {"type": "route_created", "route_id": 5}
+        # Each item is a plain dict e.g. {"type": "path_created", "route_id": 5}
         self.event_queue: queue.Queue = queue.Queue()
 
         # ── Current known robot state ─────────────────────────────────────
@@ -392,7 +392,7 @@ class SerialRXThread(threading.Thread):
 
     Handles:
       type="battery"       → updates app_state.battery in place
-      type="route_created" → pushes event into app_state.event_queue
+      type="path_created"  → pushes event into app_state.event_queue
                              so the GUI can prompt the user to name it
 
     On serial error: prints a warning and exits the receive loop.
@@ -439,14 +439,13 @@ class SerialRXThread(threading.Thread):
                 with self.app_state.lock:
                     self.app_state.battery = batt
 
-            elif packet.type == "route_created":
-                # Pi has finished saving a route; GUI needs the ID to prompt for a name
-                # TODO (Pi): Send this packet from PiCommThread after record_finish
-                #            is processed and the route file is saved.
+            elif packet.type == "path_created":
+                # Pi has finished saving a route; GUI needs the ID to prompt for a name.
+                # Pi sends PathCreated(id=N) via PiCommThread.send_new_path_data().
                 data = json.loads(packet.json_data)
                 self.app_state.event_queue.put({
-                    "type": "route_created",
-                    "route_id": data.get("route_id"),
+                    "type": "path_created",
+                    "route_id": data.get("id"),
                 })
 
             elif packet.type == "kfx_ack":
@@ -828,22 +827,12 @@ class PathSubMenuScreen(BaseScreen):
 class RecordRouteScreen(BaseScreen):
     """
     The user physically drives the robot while the Pi records a path.
-    Uses TELEOP state (joystick streams normally) plus a 'record_start'
-    command packet so the Pi enables localization and route saving.
 
-    On enter     → StateData(TELEOP) + 'record_start' + joystick_active=True
-    FINISH ROUTE → 'record_finish' packet; buttons disabled; waits for Pi
-                   to respond with a 'route_created' event, then navigates
-                   to NameRouteScreen passing the new route ID.
-    CANCEL ROUTE → 'record_cancel' + StateData(DISABLED) → PathSubMenu
-
-    TODO (Pi): In PiCommThread._process_packet, handle 'record_start' by
-               enabling localization and beginning route point collection.
-    TODO (Pi): On 'record_finish', save collected points as a PathData file,
-               assign the next available route ID, then send back:
-               DataPacket(type="route_created",
-                          json_data=json.dumps({"route_id": new_id}))
-    TODO (Pi): On 'record_cancel', discard in-progress route data cleanly.
+    On enter     → StateData(RECORD_PATH) + joystick_active=True
+    FINISH ROUTE → StateData(DISABLED); Pi cancels CreatePathCmd, saves CSV,
+                   sends DataPacket(type="path_created", json_data={"id": N});
+                   GUI waits for 'path_created' event then navigates to NameRouteScreen.
+    CANCEL ROUTE → StateData(DISABLED) → PathSubMenu
     """
     def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
@@ -884,7 +873,7 @@ class RecordRouteScreen(BaseScreen):
 
         # ── Start recording on screen construction ────────────────────────
         self._enter()
-        self._poll_events()   # Begin polling for route_created confirmation
+        self._poll_events()   # Begin polling for path_created confirmation
 
     def _enter(self):
         """
@@ -951,14 +940,14 @@ class RecordRouteScreen(BaseScreen):
 
     def _poll_events(self):
         """
-        Check the inbound event queue every 200 ms for a 'route_created'
+        Check the inbound event queue every 200 ms for a 'path_created'
         confirmation from the Pi. When received, navigate to NameRouteScreen.
         Stops automatically when this frame is destroyed (frame swap).
         """
         try:
             while not self.state.event_queue.empty():
                 event = self.state.event_queue.get_nowait()
-                if event.get("type") == "route_created":
+                if event.get("type") == "path_created":
                     self._cancel_finish_timeout()
                     with self.state.lock:
                         self.state.joystick_active = False
@@ -968,7 +957,7 @@ class RecordRouteScreen(BaseScreen):
                 elif event.get("type") == "connection_lost":
                     # Put it back for the global app poller to display the warning.
                     # Do NOT return here – keep rescheduling so we still catch
-                    # route_created if the Pi manages to send it before fully disconnecting.
+                    # path_created if the Pi manages to send it before fully disconnecting.
                     self.state.event_queue.put(event)
         except Exception:
             pass
@@ -985,7 +974,7 @@ class RecordRouteScreen(BaseScreen):
 class NameRouteScreen(BaseScreen):
     """
     Prompts the user to give a human-readable name to a newly recorded route.
-    Shown automatically after RecordRouteScreen receives 'route_created' from Pi.
+    Shown automatically after RecordRouteScreen receives 'path_created' from Pi.
 
     SAVE   → writes route_id → name into routes.json, navigates to PathSubMenu
     CANCEL → discards the name entry (route still exists on Pi by its numeric ID)
@@ -2313,7 +2302,7 @@ class BullseyeApp(ctk.CTk):
         # ── Navigate to startup screen ────────────────────────────────────
         self.show_frame(StartupScreen)
 
-        # ── Global event polling (route_created etc.) ─────────────────────
+        # ── Global event polling (path_created etc.) ──────────────────────
         self._poll_global_events()
 
         # ── Handle window close button ────────────────────────────────────
@@ -2382,7 +2371,7 @@ class BullseyeApp(ctk.CTk):
     def _poll_global_events(self):
         """
         Check the event queue every 500 ms for cross-screen events.
-        Currently handles 'route_created' put-back from screens that
+        Currently handles 'path_created' put-back from screens that
         don't consume it (e.g. if the user navigated away mid-record).
 
         Add future global events here (e.g. emergency_stop from KFX remote).
@@ -2391,7 +2380,7 @@ class BullseyeApp(ctk.CTk):
             while not self.app_state.event_queue.empty():
                 event = self.app_state.event_queue.get_nowait()
                 # Put unhandled events back for the active screen to consume.
-                # (route_created is consumed by RecordRouteScreen._poll_events)
+                # (path_created is consumed by RecordRouteScreen._poll_events)
                 self.app_state.event_queue.put(event)
                 break   # Avoid infinite re-queue loop in a single poll cycle
         except Exception:
