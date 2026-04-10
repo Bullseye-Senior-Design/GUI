@@ -1,0 +1,50 @@
+Remove as we finish thingys
+---------------------------
+1. Path Creation logic 
+- take route and save it to JSON file
+2. Path Management logic
+- Add option to remove route
+- Add option to rename route
+3. GUI e-stop
+- little box in the bottom left of the screen for e-stop
+- it will send the user back to the homescreen and state change to 0 or disabled
+- it will also print a message for the user at the top of the gui for them to click free drive to continue
+4. Battery Icons
+- Update them both not to be emojis if we can make them progress bars but distiguisable so maybe a outline bull
+- Controller outline that fills
+- Keep percents by them
+5. Start up check
+- The ping thing i talked about, don't leave the start screen until we connect with the ping
+- pi send its battery SoC to repsond so the controller is updated
+6. Boundary defining for arena
+- defining the dimensions of the rectangle we use for the areana so they give widths and length
+- maybe save on a CSV or json to persist on shutdown
+7. Create a button for setting home position
+- This will replace the return button on the free drive screen
+- it sends a packet to the pi to get the current X,Y, theta and sets that as our home position
+- Also save this on csv to persist on shutdown
+8. Display the home position of the bot on the arena
+- Will show the arena as just a rectangle with maybe the dimensions
+- Show the home position as a green dot with an arrow pointing towards the theta
+- CANNOT EDIT without using freedrive to reset
+-------------
+6 & 7 will be to options under the 6 being a menu for defining the arena 8 wil be the menu 7 selects
+-------------
+9. Data Packet Dropout
+- Currently operatable but not good practice
+- Idek cry and hope it feels bad....
+- Slow down update rate...
+- See if we have anything interferring 
+10. OPTIONAL... Sensor fault
+- Save for later
+- if there is a sensor fault display on the user screen fault in X sensor cannot run routes only free drive or something
+
+Controller stuffs
+-----------------
+1. CONTROLLER SETTINGS...
+- Do we need this or just delete it
+2. GUI Navigation
+- Using arrow keys and A to navigate menu
+3. Cursor issues
+- Figure out how to get the right stick to stop running the damn mouse
+- orrr remove highlighting until you hit a button so we don't even know and Michael doesn't cry

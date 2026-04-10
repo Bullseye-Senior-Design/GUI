@@ -1013,7 +1013,7 @@ class NameRouteScreen(BaseScreen):
         try:
             subprocess.Popen(["steam", "steam://open/keyboard"])
         except Exception as e:
-            print(f"[OSK] Could not open Steam keyboard: {e}")
+            print(f"[OK] Could not open Steam keyboard: {e}")
 
     def _save(self):
         """Validate, persist, and navigate away."""
