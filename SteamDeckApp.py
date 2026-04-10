@@ -904,6 +904,9 @@ class RecordRouteScreen(BaseScreen):
             return
         self._waiting_for_confirm = True
         self._cancel_finish_timeout()
+        enqueue_state(self.state, State.DISABLED)
+        with self.state.lock:
+            self.state.joystick_active = False
         enqueue_packet(self.state, "record_finish")
         self._status_label.configure(
             text="⏳ SAVING ROUTE...\nWaiting for Pi confirmation",
@@ -1023,13 +1026,16 @@ class NameRouteScreen(BaseScreen):
         if initial_name:
             self._entry.insert(0, initial_name)
 
-        # Keyboard button – opens Steam Deck OSK in Desktop Mode
+        # Keyboard button – opens the in-app on-screen keyboard
         ctk.CTkButton(
             entry_row, text="⌨", width=58, height=58,
             font=("Arial", 28), fg_color=C_PRIMARY,
             hover_color=C_SECONDARY,
             command=self._open_keyboard,
         ).pack(side="left")
+
+        # Build the in-app keyboard (hidden until ⌨ is pressed)
+        self._keyboard = OnScreenKeyboard(self, app_state, self._entry)
 
         # ── Action buttons ────────────────────────────────────────────────
         action_row = ctk.CTkFrame(center, fg_color="transparent")
@@ -1044,16 +1050,8 @@ class NameRouteScreen(BaseScreen):
                         width=190, height=70).pack(side="right", padx=20)
 
     def _open_keyboard(self):
-        """
-        Trigger the Steam Deck on-screen keyboard via the Steam URI.
-        Requires the Steam client to be running in Desktop Mode.
-        If Steam is not running this will silently fail (the user can
-        type with a physical keyboard instead).
-        """
-        try:
-            subprocess.Popen(["steam", "steam://open/keyboard"])
-        except Exception as e:
-            print(f"[OK] Could not open Steam keyboard: {e}")
+        """Show the in-app on-screen keyboard overlay."""
+        self._keyboard.show()
 
     def _save(self):
         """Validate, persist, and navigate away."""
@@ -1242,7 +1240,7 @@ class RunRouteScreen(BaseScreen):
                 af.pack(fill="x", padx=4, pady=(0, 4))
 
         # Always select this route for running
-        for rid, btn in self._route_buttons.items():
+        for btn in self._route_buttons.values():
             btn.configure(fg_color=C_SURFACE)
         self._selected_id = route_id
         if route_id in self._route_buttons:
@@ -1822,7 +1820,7 @@ class KFXSettingsScreen(BaseScreen):
 
     def _select_kfx_button(self, btn_num: str):
         """Gold-highlight the tapped KFX button; deselect previous."""
-        for n, btn in self._phone_buttons.items():
+        for btn in self._phone_buttons.values():
             btn.configure(fg_color=C_SURFACE)
         self._selected_btn = btn_num
         self._phone_buttons[btn_num].configure(fg_color=C_TERTIARY)
@@ -1933,6 +1931,241 @@ class KFXSettingsScreen(BaseScreen):
             self.after(500, self._poll_ack)
         except Exception:
             pass   # Widget destroyed during navigation – stop silently
+
+
+# ============================================================
+# ON-SCREEN KEYBOARD
+# In-app keyboard overlay for text entry. Parented to the calling screen
+# so it always sits above the content. Supports:
+#   Touch  – tap any key
+#   D-pad  – move highlight; btn_A (×) selects current key
+# ============================================================
+
+class OnScreenKeyboard:
+    """
+    Compact on-screen keyboard placed as a full-screen dim overlay.
+    Writes characters directly into the provided CTkEntry widget.
+
+    Navigation:
+      D-pad left/right  – move between keys in current row
+      D-pad up/down     – move between rows (col clamped to row width)
+      btn_A (×)         – press highlighted key
+      Touch             – tap any key directly
+
+    Key layout (4 main rows + SPACE/DONE bottom row):
+      1 2 3 4 5 6 7 8 9 0
+      Q W E R T Y U I O P
+      A S D F G H J K L ⌫
+      Z X C V B N M . - _
+      [    SPACE    ] [DONE]
+    """
+
+    _ROWS = [
+        list("1234567890"),
+        list("QWERTYUIOP"),
+        list("ASDFGHJKL⌫"),
+        list("ZXCVBNM.-_"),
+    ]
+    _KEY_W = 108
+    _KEY_H = 62
+    _PAD   = 4
+
+    def __init__(self, parent: ctk.CTkFrame, app_state: AppState,
+                 entry: ctk.CTkEntry, on_done=None):
+        self._state   = app_state
+        self._entry   = entry
+        self._on_done = on_done
+        self._visible = False
+
+        # Navigation cursor (row into _ROWS; len(_ROWS) = bottom SPACE/DONE row)
+        self._row = 0
+        self._col = 0
+
+        # Dpad / btn_A edge-detection (press fires once per physical press)
+        self._prev_up    = False
+        self._prev_down  = False
+        self._prev_left  = False
+        self._prev_right = False
+        self._prev_a     = False
+
+        # Widget refs: (row, col) tuples for main grid; "SPC" / "DONE" for bottom row
+        self._btns: dict = {}
+
+        # ── Dim overlay covers the entire parent frame ────────────────────
+        self._overlay = tk.Frame(parent, bg="#000000")
+        self._overlay.place_forget()
+
+        # ── Keyboard card sits at the bottom of the overlay ───────────────
+        self._card = ctk.CTkFrame(self._overlay, fg_color=C_SURFACE, corner_radius=16)
+        self._card.place(relx=0.5, rely=1.0, anchor="s", x=0, y=-8)
+
+        self._build()
+        self._highlight()
+
+    # ── Build ─────────────────────────────────────────────────────────────
+
+    def _build(self):
+        grid_frame = ctk.CTkFrame(self._card, fg_color="transparent")
+        grid_frame.pack(padx=12, pady=(12, 6))
+
+        for r, row_keys in enumerate(self._ROWS):
+            for c, key in enumerate(row_keys):
+                is_back = key == "⌫"
+                btn = ctk.CTkButton(
+                    grid_frame,
+                    text=key,
+                    width=self._KEY_W,
+                    height=self._KEY_H,
+                    font=("Arial Bold", 20),
+                    fg_color=C_DANGER if is_back else C_PRIMARY,
+                    hover_color="#991a00" if is_back else C_SECONDARY,
+                    text_color=C_TEXT,
+                    corner_radius=8,
+                    command=lambda k=key: self._press(k),
+                )
+                btn.grid(row=r, column=c,
+                         padx=self._PAD // 2, pady=self._PAD // 2)
+                self._btns[(r, c)] = btn
+
+        # ── Bottom row: SPACE (wide) + DONE ──────────────────────────────
+        bottom_frame = ctk.CTkFrame(self._card, fg_color="transparent")
+        bottom_frame.pack(padx=12, pady=(0, 12))
+
+        # SPACE spans ~7 key widths; DONE spans ~3
+        spc_w  = self._KEY_W * 7 + self._PAD * 6
+        done_w = self._KEY_W * 3 + self._PAD * 2
+
+        self._btns["SPC"] = ctk.CTkButton(
+            bottom_frame, text="SPACE",
+            width=spc_w, height=self._KEY_H,
+            font=("Arial Bold", 18),
+            fg_color=C_PRIMARY, hover_color=C_SECONDARY,
+            text_color=C_TEXT, corner_radius=8,
+            command=lambda: self._press("SPC"),
+        )
+        self._btns["SPC"].pack(side="left", padx=self._PAD // 2)
+
+        self._btns["DONE"] = ctk.CTkButton(
+            bottom_frame, text="DONE",
+            width=done_w, height=self._KEY_H,
+            font=("Arial Bold", 18),
+            fg_color=C_SECONDARY, hover_color=C_TERTIARY,
+            text_color=C_TEXT, corner_radius=8,
+            command=lambda: self._press("DONE"),
+        )
+        self._btns["DONE"].pack(side="left", padx=self._PAD // 2)
+
+    # ── Highlight ─────────────────────────────────────────────────────────
+
+    def _highlight(self):
+        """Gold-highlight the current cursor key; restore all others."""
+        is_bottom = self._row == len(self._ROWS)
+
+        for (r, c), btn in [(k, v) for k, v in self._btns.items()
+                             if isinstance(k, tuple)]:
+            key = self._ROWS[r][c]
+            is_cur = (r == self._row and c == self._col and not is_bottom)
+            if key == "⌫":
+                btn.configure(fg_color=C_TERTIARY if is_cur else C_DANGER)
+            else:
+                btn.configure(fg_color=C_TERTIARY if is_cur else C_PRIMARY)
+
+        spc_cur  = is_bottom and self._col == 0
+        done_cur = is_bottom and self._col == 1
+        self._btns["SPC"].configure(
+            fg_color=C_TERTIARY if spc_cur else C_PRIMARY)
+        self._btns["DONE"].configure(
+            fg_color=C_TERTIARY if done_cur else C_SECONDARY)
+
+    # ── Key press ─────────────────────────────────────────────────────────
+
+    def _press(self, key: str):
+        if key == "⌫":
+            current = self._entry.get()
+            if current:
+                self._entry.delete(len(current) - 1, "end")
+        elif key == "SPC":
+            self._entry.insert("end", " ")
+        elif key == "DONE":
+            self.hide()
+        else:
+            self._entry.insert("end", key)
+
+    # ── Visibility ────────────────────────────────────────────────────────
+
+    def show(self):
+        self._overlay.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+        self._overlay.lift()
+        self._overlay.configure(bg="#00000099")
+        self._visible = True
+        self._poll()
+
+    def hide(self):
+        self._overlay.place_forget()
+        self._visible = False
+        if self._on_done:
+            self._on_done()
+
+    # ── D-pad polling ─────────────────────────────────────────────────────
+
+    def _poll(self):
+        if not self._visible:
+            return
+
+        with self._state.lock:
+            ctrl = self._state.controller
+
+        up    = bool(ctrl.dpad_up)
+        down  = bool(ctrl.dpad_down)
+        left  = bool(ctrl.dpad_left)
+        right = bool(ctrl.dpad_right)
+        a_btn = bool(ctrl.btn_A)
+
+        total_rows = len(self._ROWS) + 1  # +1 for SPACE/DONE row
+
+        if right and not self._prev_right:
+            max_col = 1 if self._row == len(self._ROWS) else len(self._ROWS[self._row]) - 1
+            self._col = (self._col + 1) % (max_col + 1)
+            self._highlight()
+
+        if left and not self._prev_left:
+            max_col = 1 if self._row == len(self._ROWS) else len(self._ROWS[self._row]) - 1
+            self._col = (self._col - 1) % (max_col + 1)
+            self._highlight()
+
+        if down and not self._prev_down:
+            self._row = (self._row + 1) % total_rows
+            if self._row == len(self._ROWS):
+                # Entering SPACE/DONE row: proportionally pick SPACE or DONE
+                self._col = 0 if self._col <= 6 else 1
+            else:
+                self._col = min(self._col, len(self._ROWS[self._row]) - 1)
+            self._highlight()
+
+        if up and not self._prev_up:
+            self._row = (self._row - 1) % total_rows
+            if self._row == len(self._ROWS):
+                self._col = min(self._col, 1)
+            else:
+                self._col = min(self._col, len(self._ROWS[self._row]) - 1)
+            self._highlight()
+
+        if a_btn and not self._prev_a:
+            if self._row == len(self._ROWS):
+                self._press("SPC" if self._col == 0 else "DONE")
+            else:
+                self._press(self._ROWS[self._row][self._col])
+
+        self._prev_up    = up
+        self._prev_down  = down
+        self._prev_left  = left
+        self._prev_right = right
+        self._prev_a     = a_btn
+
+        try:
+            self._overlay.after(50, self._poll)
+        except Exception:
+            pass   # Widget destroyed on navigation – stop silently
 
 
 # ============================================================
