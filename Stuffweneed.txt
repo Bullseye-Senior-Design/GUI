@@ -1,10 +1,5 @@
 Remove as we finish thingys
 ---------------------------
-
-4. Battery Icons
-- Update them both not to be emojis if we can make them progress bars but distiguisable so maybe a outline bull
-- Controller outline that fills
-- Keep percents by them
 5. Start up check
 - The ping thing i talked about, don't leave the start screen until we connect with the ping
 - pi send its battery SoC to repsond so the controller is updated

@@ -38,6 +38,8 @@ import subprocess
 from pathlib import Path
 from collections import deque
 from PIL import Image
+from PIL import Image, ImageTk
+
 
 # ── Package path so Comms/Robot imports resolve from project root ─────────────
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -2305,22 +2307,57 @@ class BullseyeApp(ctk.CTk):
         self._top_bar.pack_propagate(False)   # Keep fixed height
 
         # Robot battery label – bottom-left
-        self._robot_batt_lbl = ctk.CTkLabel(
-            self._top_bar,
-            text="🤖 --%",
-            font=("Arial Bold", 18),
-            text_color=C_TEXT,
-        )
-        self._robot_batt_lbl.pack(side="left", padx=16)
+        #self._robot_batt_lbl = ctk.CTkLabel(
+        #    self._top_bar,
+        #    text="🐂 --%",
+        #    font=("Arial Bold", 18),
+        #    text_color=C_TEXT,
+        #)
+        #self._robot_batt_lbl.pack(side="left", padx=16)
 
         # Steam Deck battery label – top-right
-        self._deck_batt_lbl = ctk.CTkLabel(
-            self._top_bar,
-            text="🎮 --%",
-            font=("Arial Bold", 18),
-            text_color=C_TEXT,
+        #self._deck_batt_lbl = ctk.CTkLabel(
+        #    self._top_bar,
+        #    text="🎮 --%",
+        #    font=("Arial Bold", 18),
+        #    text_color=C_TEXT,
+        #)
+        #self._deck_batt_lbl.pack(side="right", padx=16)
+
+        # ── Robot battery visual ──────────────────────────────────────────────── = shit i added to get the icons to show up
+        robot_frame = ctk.CTkFrame(self._top_bar, fg_color="transparent")
+        robot_frame.pack(side="left", padx=16)
+
+        self._robot_batt_lbl = ctk.CTkLabel(
+            robot_frame, text="🐂 --%", font=("Segoe UI Emoji", 18),
+            text_color=C_TEXT
         )
-        self._deck_batt_lbl.pack(side="right", padx=16)
+        self._robot_batt_lbl.pack(side="left", padx=(0, 8))
+
+        self._robot_batt_canvas = tk.Canvas(
+         robot_frame, width=40, height=18,
+         bg=C_BG, highlightthickness=1, highlightbackground=C_TEXT
+        )
+        
+        
+        self._robot_batt_canvas.pack(side="left")
+
+# ── Steam Deck battery visual ───────────────────────────────────────────
+        deck_frame = ctk.CTkFrame(self._top_bar, fg_color="transparent")
+        deck_frame.pack(side="right", padx=16)
+
+        self._deck_batt_lbl = ctk.CTkLabel(
+            deck_frame, text="🎮 --%", font=("Arial Bold", 18),
+           text_color=C_TEXT
+        )
+        self._deck_batt_lbl.pack(side="right", padx=(8, 0))
+
+        self._deck_batt_canvas = tk.Canvas(
+            deck_frame, width=40, height=18,
+            bg=C_BG, highlightthickness=1, highlightbackground=C_TEXT
+        )
+        self._deck_batt_canvas.pack(side="right")
+
 
         # Start refreshing both battery labels every 5 seconds.
         # Robot battery updates at robot pace (~every 5 s from Pi).
@@ -2349,6 +2386,27 @@ class BullseyeApp(ctk.CTk):
         # ── Handle window close button ────────────────────────────────────
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+
+    def _draw_battery(self, canvas: tk.Canvas, percent: float):
+        """Fill the canvas to visually represent battery percentage."""
+        canvas.delete("all")
+        percent = max(0, min(100, percent))  # clamp 0–100
+    
+        # fill width proportional to soc
+        fill_w = int((percent / 100) * 36)
+        color = "#00ff00" if percent > 50 else ("#ffaa00" if percent > 20 else "#ff0000")
+
+        # outer border (battery body)
+        canvas.create_rectangle(1, 1, 38, 16, outline=C_TEXT, width=1)
+        # terminal
+        canvas.create_rectangle(38, 5, 40, 12, fill=C_TEXT, outline=C_TEXT)
+        # fill level
+        if fill_w > 0:
+            canvas.create_rectangle(2, 2, 2 + fill_w, 15, fill=color, width=0)
+
+
+
+
     def _refresh_top_bar(self):
         """
         Poll both batteries every 5 seconds and update the top bar labels.
@@ -2361,14 +2419,27 @@ class BullseyeApp(ctk.CTk):
         """
         try:
             # ── Robot battery (from Pi over XBee) ────────────────────────
-            with self.app_state.lock:
-                robot_soc = self.app_state.battery.state_of_charge
-            self._robot_batt_lbl.configure(text=f"🤖 {robot_soc:.0f}%")
+            #with self.app_state.lock:
+            #    robot_soc = self.app_state.battery.state_of_charge
+            #self._robot_batt_lbl.configure(text=f"🤖 {robot_soc:.0f}%")
 
             # ── Steam Deck battery (Linux sysfs) ─────────────────────────
+            #deck_soc = get_steamdeck_battery()
+            #deck_text = f"🎮 {deck_soc}%" if deck_soc is not None else "🎮 --%"
+            #self._deck_batt_lbl.configure(text=deck_text)
+
+            with self.app_state.lock:
+             robot_soc = self.app_state.battery.state_of_charge
+            self._robot_batt_lbl.configure(text=f" 🐂 {robot_soc:.0f}%")
+            self._draw_battery(self._robot_batt_canvas, robot_soc)
+
             deck_soc = get_steamdeck_battery()
-            deck_text = f"🎮 {deck_soc}%" if deck_soc is not None else "🎮 --%"
-            self._deck_batt_lbl.configure(text=deck_text)
+            if deck_soc is None:
+                deck_soc = 0
+            self._deck_batt_lbl.configure(text=f"🎮 {deck_soc}%")
+            self._draw_battery(self._deck_batt_canvas, deck_soc)
+
+
 
         except Exception as e:
             print(f"[TOP BAR] Refresh error: {e}")
