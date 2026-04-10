@@ -1,27 +1,26 @@
 Remove as we finish thingys
 ---------------------------
 
-4. Battery Icons
+1. Battery Icons
 - Update them both not to be emojis if we can make them progress bars but distiguisable so maybe a outline bull
 - Controller outline that fills
 - Keep percents by them
-5. Start up check
+2. Start up check
 - The ping thing i talked about, don't leave the start screen until we connect with the ping
 - pi send its battery SoC to repsond so the controller is updated
-6. Boundary defining for arena
+3. Boundary defining for arena
 - defining the dimensions of the rectangle we use for the areana so they give widths and length
 - maybe save on a CSV or json to persist on shutdown
-7. Create a button for setting home position
+4. Create a button for setting home position
 - This will replace the return button on the free drive screen
 - it sends a packet to the pi to get the current X,Y, theta and sets that as our home position
 - Also save this on csv to persist on shutdown
-8. Display the home position of the bot on the arena
+5. Display the home position of the bot on the arena
 - Will show the arena as just a rectangle with maybe the dimensions
 - Show the home position as a green dot with an arrow pointing towards the theta
 - CANNOT EDIT without using freedrive to reset
--------------
-6 & 7 will be to options under the 6 being a menu for defining the arena 8 wil be the menu 7 selects
--------------
+6. Error messages added when messages are not received... (KFX, Route Saved, Home position, Connect ping)
+
 9. Data Packet Dropout
 - Currently operatable but not good practice
 - Idek cry and hope it feels bad....
