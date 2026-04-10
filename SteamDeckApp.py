@@ -221,6 +221,11 @@ class AppState:
         self.routes: dict = load_routes()       # {"route_id_str": "name", ...}
         self.kfx_config: dict = load_kfx_config()  # {"3": id_or_None, ...}
 
+        # ── E-Stop state ──────────────────────────────────────────────────
+        # Set True when the E-STOP overlay button is pressed.
+        # Cleared when the user selects DRIVE or PATH MENU from MainMenuScreen.
+        self.e_stop_active: bool = False
+
 
 # ============================================================
 # BACKGROUND THREADS
@@ -659,9 +664,27 @@ class MainMenuScreen(BaseScreen):
     """
     Central navigation hub. No robot state changes are sent from here.
     Three large buttons route to Drive, Path, and Settings sections.
+
+    If app_state.e_stop_active is True on entry a gold banner is shown at
+    the top of the screen. The banner clears when DRIVE or PATH MENU is pressed.
     """
     def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
+
+        # ── E-Stop banner (shown only when e_stop_active) ─────────────────
+        with self.state.lock:
+            e_stopped = self.state.e_stop_active
+
+        if e_stopped:
+            banner = ctk.CTkFrame(self, fg_color=C_TERTIARY, corner_radius=0, height=52)
+            banner.pack(fill="x", side="top")
+            banner.pack_propagate(False)
+            ctk.CTkLabel(
+                banner,
+                text="E-STOP ACTIVATED — Select DRIVE or PATH MENU to continue",
+                font=("Arial Bold", 18),
+                text_color=C_BG,
+            ).place(relx=0.5, rely=0.5, anchor="center")
 
         center = ctk.CTkFrame(self, fg_color="transparent")
         center.place(relx=0.5, rely=0.5, anchor="center")
@@ -671,10 +694,10 @@ class MainMenuScreen(BaseScreen):
                      text_color=C_TEXT).pack(pady=(0, 50))
 
         make_nav_button(center, "DRIVE",
-                        command=lambda: self.show(FreeDriveScreen)).pack(pady=14)
+                        command=self._go_drive).pack(pady=14)
 
         make_nav_button(center, "PATH MENU",
-                        command=lambda: self.show(PathSubMenuScreen)).pack(pady=14)
+                        command=self._go_path_menu).pack(pady=14)
 
         make_nav_button(center, "SETTINGS",
                         command=lambda: self.show(SettingsSubMenuScreen)).pack(pady=14)
@@ -688,6 +711,16 @@ class MainMenuScreen(BaseScreen):
             text_color=C_TEXT, corner_radius=16,
             width=160, height=60,
         ).place(relx=1.0, rely=1.0, x=-20, y=-20, anchor="se")
+
+    def _go_drive(self):
+        with self.state.lock:
+            self.state.e_stop_active = False
+        self.show(FreeDriveScreen)
+
+    def _go_path_menu(self):
+        with self.state.lock:
+            self.state.e_stop_active = False
+        self.show(PathSubMenuScreen)
 
 
 # ============================================================
@@ -955,14 +988,19 @@ class NameRouteScreen(BaseScreen):
     CANCEL → discards the name entry (route still exists on Pi by its numeric ID)
     ⌨ btn  → launches the Steam Deck on-screen keyboard (Desktop Mode via Steam)
     """
-    def __init__(self, parent, app, app_state: AppState, route_id: int = None):
+    def __init__(self, parent, app, app_state: AppState,
+                 route_id: int = None,
+                 initial_name: str = "",
+                 heading: str = "NAME YOUR ROUTE",
+                 return_screen=None):
         super().__init__(parent, app, app_state)
         self._route_id = route_id
+        self._return_screen = return_screen  # None → PathSubMenuScreen
 
         center = ctk.CTkFrame(self, fg_color="transparent")
         center.place(relx=0.5, rely=0.5, anchor="center")
 
-        ctk.CTkLabel(center, text="NAME YOUR ROUTE",
+        ctk.CTkLabel(center, text=heading,
                      font=("Arial Bold", 34),
                      text_color=C_TEXT).pack(pady=(0, 8))
 
@@ -982,6 +1020,8 @@ class NameRouteScreen(BaseScreen):
             text_color=C_TEXT,
         )
         self._entry.pack(side="left", padx=(0, 10))
+        if initial_name:
+            self._entry.insert(0, initial_name)
 
         # Keyboard button – opens Steam Deck OSK in Desktop Mode
         ctk.CTkButton(
@@ -996,7 +1036,7 @@ class NameRouteScreen(BaseScreen):
         action_row.pack(pady=44)
 
         make_nav_button(action_row, "CANCEL",
-                        command=lambda: self.show(PathSubMenuScreen),
+                        command=lambda: self.show(self._return_screen or PathSubMenuScreen),
                         color=C_DANGER, width=190, height=70).pack(side="left", padx=20)
 
         make_nav_button(action_row, "SAVE",
@@ -1028,7 +1068,7 @@ class NameRouteScreen(BaseScreen):
             self.state.routes[str(self._route_id)] = name
             routes_snapshot = dict(self.state.routes)   # Copy under lock for safe JSON write
         save_routes(routes_snapshot)
-        self.show(PathSubMenuScreen)
+        self.show(self._return_screen or PathSubMenuScreen)
 
 
 # ============================================================
@@ -1053,7 +1093,9 @@ class RunRouteScreen(BaseScreen):
         super().__init__(parent, app, app_state)
 
         self._selected_id: int | None = None
-        self._route_buttons: dict = {}   # route_id (int) → CTkButton
+        self._route_buttons: dict = {}        # route_id (int) → CTkButton (main row)
+        self._route_action_frames: dict = {}  # route_id (int) → CTkFrame (hidden sub-row)
+        self._expanded_id: int | None = None  # which row is currently expanded
         self._is_running: bool = False
 
         # ── Main two-column content ───────────────────────────────────────
@@ -1129,6 +1171,9 @@ class RunRouteScreen(BaseScreen):
         for w in self._route_scroll.winfo_children():
             w.destroy()
         self._route_buttons.clear()
+        self._route_action_frames.clear()
+        self._expanded_id = None
+        self._selected_id = None
 
         with self.state.lock:
             routes = dict(self.state.routes)
@@ -1142,28 +1187,165 @@ class RunRouteScreen(BaseScreen):
 
         for route_id_str, name in routes.items():
             rid = int(route_id_str)
+
+            # Outer container — holds row button + collapsible action frame
+            outer = ctk.CTkFrame(self._route_scroll, fg_color="transparent")
+            outer.pack(fill="x", pady=2)
+
+            # Main row button
             btn = ctk.CTkButton(
-                self._route_scroll,
+                outer,
                 text=f"  {name}   (ID {rid})",
                 font=("Arial Bold", 18),
                 fg_color=C_SURFACE, hover_color=C_SECONDARY,
                 text_color=C_TEXT, corner_radius=8,
                 height=62, anchor="w",
-                command=lambda r=rid: self._select_route(r),
+                command=lambda r=rid: self._tap_route(r),
             )
-            btn.pack(fill="x", pady=4)
+            btn.pack(fill="x")
             self._route_buttons[rid] = btn
 
-    def _select_route(self, route_id: int):
+            # Action sub-frame — hidden until the row is expanded
+            action = ctk.CTkFrame(outer, fg_color=C_SURFACE, corner_radius=8)
+            # Not packed yet; _tap_route will pack/forget it
+            self._route_action_frames[rid] = action
+
+    def _tap_route(self, route_id: int):
         """
-        Highlight the tapped route row gold and deselect all others.
-        Stores the selected route_id so _run() can include it in the packet.
+        Tap a route row:
+          - Selects it for running (gold highlight).
+          - Expands its action sub-frame; collapses any previously open one.
+          - Tapping the same row again collapses it (keeps it selected).
         """
+        # Collapse previously expanded row (different from this one)
+        if self._expanded_id is not None and self._expanded_id != route_id:
+            old = self._expanded_id
+            af = self._route_action_frames.get(old)
+            if af:
+                af.pack_forget()
+            if old in self._route_buttons:
+                color = C_TERTIARY if old == self._selected_id else C_SURFACE
+                self._route_buttons[old].configure(fg_color=color)
+
+        if self._expanded_id == route_id:
+            # Same row tapped again → collapse
+            af = self._route_action_frames.get(route_id)
+            if af:
+                af.pack_forget()
+            self._expanded_id = None
+        else:
+            # Expand this row
+            self._expanded_id = route_id
+            af = self._route_action_frames.get(route_id)
+            if af:
+                self._populate_action_normal(route_id, af)
+                af.pack(fill="x", padx=4, pady=(0, 4))
+
+        # Always select this route for running
         for rid, btn in self._route_buttons.items():
             btn.configure(fg_color=C_SURFACE)
+        self._selected_id = route_id
         if route_id in self._route_buttons:
             self._route_buttons[route_id].configure(fg_color=C_TERTIARY)
-        self._selected_id = route_id
+
+    def _populate_action_normal(self, route_id: int, frame: ctk.CTkFrame):
+        """Fill the action frame with [RENAME] [DELETE] buttons."""
+        for w in frame.winfo_children():
+            w.destroy()
+        frame.configure(fg_color=C_SURFACE)
+
+        with self.state.lock:
+            name = self.state.routes.get(str(route_id), "")
+
+        ctk.CTkButton(
+            frame, text="RENAME",
+            font=("Arial Bold", 14),
+            fg_color=C_SECONDARY, hover_color=C_TERTIARY,
+            text_color=C_TEXT, corner_radius=6,
+            height=40, width=130,
+            command=lambda: self._rename_route(route_id, name),
+        ).pack(side="left", padx=(8, 4), pady=6)
+
+        ctk.CTkButton(
+            frame, text="DELETE",
+            font=("Arial Bold", 14),
+            fg_color=C_DANGER, hover_color="#991a00",
+            text_color=C_TEXT, corner_radius=6,
+            height=40, width=130,
+            command=lambda: self._delete_prompt(route_id),
+        ).pack(side="left", padx=(4, 8), pady=6)
+
+    def _delete_prompt(self, route_id: int):
+        """Switch the action frame to delete-confirmation mode."""
+        af = self._route_action_frames.get(route_id)
+        if af is None:
+            return
+        af.configure(fg_color="#4a0000")
+        if route_id in self._route_buttons:
+            self._route_buttons[route_id].configure(fg_color=C_DANGER)
+
+        for w in af.winfo_children():
+            w.destroy()
+
+        ctk.CTkButton(
+            af, text="CONFIRM DELETE",
+            font=("Arial Bold", 14),
+            fg_color=C_DANGER, hover_color="#991a00",
+            text_color=C_TEXT, corner_radius=6,
+            height=40, width=170,
+            command=lambda: self._confirm_delete(route_id),
+        ).pack(side="left", padx=(8, 4), pady=6)
+
+        ctk.CTkButton(
+            af, text="CANCEL",
+            font=("Arial Bold", 14),
+            fg_color=C_PRIMARY, hover_color=C_SECONDARY,
+            text_color=C_TEXT, corner_radius=6,
+            height=40, width=110,
+            command=lambda: self._cancel_delete(route_id),
+        ).pack(side="left", padx=(4, 8), pady=6)
+
+    def _cancel_delete(self, route_id: int):
+        """Restore action frame to normal RENAME/DELETE state."""
+        af = self._route_action_frames.get(route_id)
+        if af is None:
+            return
+        self._populate_action_normal(route_id, af)
+        if route_id in self._route_buttons:
+            self._route_buttons[route_id].configure(fg_color=C_TERTIARY)
+
+    def _confirm_delete(self, route_id: int):
+        """Remove route from storage, clear KFX refs, send updated config, rebuild."""
+        with self.state.lock:
+            routes_snapshot = dict(self.state.routes)
+        routes_snapshot.pop(str(route_id), None)
+        with self.state.lock:
+            self.state.routes = routes_snapshot
+        save_routes(routes_snapshot)
+
+        # Clear any KFX button that was pointing to this route
+        with self.state.lock:
+            kfx = dict(self.state.kfx_config)
+        changed = False
+        for btn_num, assigned_id in kfx.items():
+            if assigned_id == route_id:
+                kfx[btn_num] = None
+                changed = True
+        if changed:
+            with self.state.lock:
+                self.state.kfx_config = kfx
+            save_kfx_config(kfx)
+            enqueue_packet(self.state, "kfx_config", json.dumps(kfx))
+
+        self._build_route_list()
+
+    def _rename_route(self, route_id: int, current_name: str):
+        """Navigate to NameRouteScreen pre-filled for renaming."""
+        self.show(NameRouteScreen,
+                  route_id=route_id,
+                  initial_name=current_name,
+                  heading="RENAME ROUTE",
+                  return_screen=RunRouteScreen)
 
     def _on_speed_change(self, value):
         """Update the speed label as the slider moves. Value is 10–100 (int steps)."""
@@ -1754,6 +1936,57 @@ class KFXSettingsScreen(BaseScreen):
 
 
 # ============================================================
+# E-STOP OVERLAY WIDGET
+# Persistent bottom-left button that lives on the root window
+# via place() so it survives frame swaps.
+# Hidden on StartupScreen and MainMenuScreen; shown everywhere else.
+# ============================================================
+
+class EStopWidget:
+    """
+    120×60 red E-STOP button placed on the root window.
+    On press: sends DISABLED, stops joystick stream, sets e_stop_active,
+    then navigates to MainMenuScreen.
+
+    show() / hide() are called by BullseyeApp.show_frame() on every
+    screen transition. lift() keeps it above the content frame.
+    """
+    def __init__(self, root: ctk.CTk, app, app_state: AppState):
+        self._app = app
+        self._state = app_state
+
+        self._btn = ctk.CTkButton(
+            root,
+            text="E-STOP",
+            font=("Arial", 22, "bold"),
+            fg_color=C_DANGER, hover_color="#991a00",
+            text_color=C_TEXT, corner_radius=12,
+            width=120, height=60,
+            command=self._on_press,
+        )
+        # Start hidden; show_frame() will call show() when appropriate
+        # _place coordinates are set in show() so we only place when needed
+
+    def show(self):
+        self._btn.place(x=12, y=WINDOW_H - 12, anchor="sw")
+        self._btn.lift()
+
+    def hide(self):
+        self._btn.place_forget()
+
+    def lift(self):
+        """Re-raise above any newly packed content frame."""
+        self._btn.lift()
+
+    def _on_press(self):
+        enqueue_state(self._state, State.DISABLED)
+        with self._state.lock:
+            self._state.joystick_active = False
+            self._state.e_stop_active = True
+        self._app.show_frame(MainMenuScreen)
+
+
+# ============================================================
 # ROOT APPLICATION WINDOW
 # ============================================================
 
@@ -1841,6 +2074,9 @@ class BullseyeApp(ctk.CTk):
         if DEBUG_OVERLAY:
             self._overlay = DebugOverlay(self, app_state)
 
+        # ── E-Stop overlay (persistent bottom-left button) ────────────────
+        self._estop = EStopWidget(self, self, app_state)
+
         # ── Navigate to startup screen ────────────────────────────────────
         self.show_frame(StartupScreen)
 
@@ -1899,9 +2135,16 @@ class BullseyeApp(ctk.CTk):
         frame.pack(fill="both", expand=True)
         self._current_frame = frame
 
-        # Re-raise overlay above the new frame
+        # E-Stop overlay: hidden on Startup and Main Menu, visible everywhere else
+        if screen_class in (StartupScreen, MainMenuScreen):
+            self._estop.hide()
+        else:
+            self._estop.show()
+
+        # Re-raise overlays above the new frame
         if self._overlay:
             self._overlay.lift()
+        self._estop.lift()
 
     def _poll_global_events(self):
         """
