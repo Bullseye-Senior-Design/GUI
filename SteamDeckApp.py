@@ -839,6 +839,8 @@ class RecordRouteScreen(BaseScreen):
 
         self._waiting_for_confirm = False   # True after FINISH pressed
         self._finish_timeout_id: str | None = None
+        self._poll_id: str | None = None      # after() id for _poll_events; cancelled on destroy
+        self.bind("<Destroy>", self._on_destroy)
 
         # ── Center content ────────────────────────────────────────────────
         center = ctk.CTkFrame(self, fg_color="transparent")
@@ -909,6 +911,16 @@ class RecordRouteScreen(BaseScreen):
             self._on_finish_timeout,
         )
 
+    def _on_destroy(self, *_):
+        """Cancel any pending after() callbacks when the frame is destroyed."""
+        if self._poll_id is not None:
+            try:
+                self.after_cancel(self._poll_id)
+            except Exception:
+                pass
+            self._poll_id = None
+        self._cancel_finish_timeout()
+
     def _cancel_finish_timeout(self):
         if self._finish_timeout_id is not None:
             try:
@@ -942,8 +954,15 @@ class RecordRouteScreen(BaseScreen):
         """
         Check the inbound event queue every 200 ms for a 'path_created'
         confirmation from the Pi. When received, navigate to NameRouteScreen.
-        Stops automatically when this frame is destroyed (frame swap).
+        Stops when the frame is destroyed (after_id cancelled in _on_destroy).
         """
+        self._poll_id = None
+        # If this widget was already destroyed (e.g. e-stop fired), do nothing.
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
         try:
             while not self.state.event_queue.empty():
                 event = self.state.event_queue.get_nowait()
@@ -962,7 +981,7 @@ class RecordRouteScreen(BaseScreen):
         except Exception:
             pass
         try:
-            self.after(200, self._poll_events)
+            self._poll_id = self.after(200, self._poll_events)
         except Exception:
             pass   # Widget destroyed – stop polling
 
