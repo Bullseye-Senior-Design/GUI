@@ -21,6 +21,7 @@
 # ============================================================
 DEBUG_OVERLAY      = False    # Show semi-transparent TX log overlay on screen
 REQUIRE_CONNECTION = False   # True = halt on missing XBee; False = UI-only mode
+FAKE_ROUTE_SAVE    = False   # True = skip Pi; FINISH ROUTE immediately generates a random route ID
 # ============================================================
 
 import customtkinter as ctk
@@ -898,6 +899,13 @@ class RecordRouteScreen(BaseScreen):
         enqueue_state(self.state, State.DISABLED)
         with self.state.lock:
             self.state.joystick_active = False
+
+        if FAKE_ROUTE_SAVE:
+            import random
+            fake_id = random.randint(1000, 9999)
+            self.show(NameRouteScreen, route_id=fake_id)
+            return
+
         enqueue_packet(self.state, "record_finish")
         self._status_label.configure(
             text="⏳ SAVING ROUTE...\nWaiting for Pi confirmation",
@@ -2404,17 +2412,23 @@ class BullseyeApp(ctk.CTk):
     def _poll_global_events(self):
         """
         Check the event queue every 500 ms for cross-screen events.
-        Currently handles 'path_created' put-back from screens that
-        don't consume it (e.g. if the user navigated away mid-record).
 
-        Add future global events here (e.g. emergency_stop from KFX remote).
+        path_created: only kept alive while RecordRouteScreen is active.
+        If the user e-stopped or navigated away mid-save, discard it so it
+        cannot trigger NameRouteScreen on a future recording.
+
+        All other events are put back for the active screen to consume.
         """
         try:
             while not self.app_state.event_queue.empty():
                 event = self.app_state.event_queue.get_nowait()
-                # Put unhandled events back for the active screen to consume.
-                # (path_created is consumed by RecordRouteScreen._poll_events)
-                self.app_state.event_queue.put(event)
+                if event.get("type") == "path_created":
+                    # Only re-queue if RecordRouteScreen is still waiting for it
+                    if isinstance(self._current_frame, RecordRouteScreen):
+                        self.app_state.event_queue.put(event)
+                    # else: stale event — silently discard
+                else:
+                    self.app_state.event_queue.put(event)
                 break   # Avoid infinite re-queue loop in a single poll cycle
         except Exception:
             pass
