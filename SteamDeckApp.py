@@ -71,6 +71,7 @@ C_SURFACE   = "#2e2e2e"   # Dark grey   – card and frame backgrounds
 C_TEXT      = "#f0f0f0"   # Off-white   – primary readable text
 C_MUTED     = "#9a9a9a"   # Grey        – secondary text, disabled items
 C_DANGER    = "#cc2200"   # Red         – stop / cancel / warning actions
+C_SUCCESS   = "#1a7a1a"   # Green       – set home, positive/confirm actions
 
 # ── Local storage file paths ──────────────────────────────────────────────────
 ROUTES_FILE     = Path(__file__).parent / "routes.json"
@@ -142,10 +143,10 @@ def save_routes(routes: dict):
 def load_kfx_config() -> dict:
     """
     Load KFX button → route_id mapping from kfx_config.json.
-    Buttons 3–8 default to None (unassigned).
-    Buttons 1 and 2 are fixed (STOP, RETURN HOME) and are NOT stored here.
+    Buttons 1–6 default to None (unassigned).
+    Buttons 7 and 8 are reserved (hardcoded on Pi) and are NOT stored here.
     """
-    default = {"3": None, "4": None, "5": None, "6": None, "7": None, "8": None}
+    default = {"1": None, "2": None, "3": None, "4": None, "5": None, "6": None}
     if KFX_CONFIG_FILE.exists():
         try:
             with open(KFX_CONFIG_FILE, "r") as f:
@@ -764,9 +765,9 @@ class FreeDriveScreen(BaseScreen):
                         command=self._back,
                         color=C_DANGER, width=220).pack(side="left", padx=40)
 
-        make_nav_button(btn_bar, "RETURN",
+        make_nav_button(btn_bar, "SET HOME",
                         command=self._return_to_menu,
-                        color=C_PRIMARY, width=220).pack(side="right", padx=40)
+                        color=C_SUCCESS, width=220).pack(side="right", padx=40)
 
         # ── Activate TELEOP on screen construction ────────────────────────
         self._enter()
@@ -1176,7 +1177,7 @@ class RunRouteScreen(BaseScreen):
 
         make_nav_button(controls, "HOME",
                         command=self._return_home,
-                        color=C_PRIMARY, width=230, height=62).pack(pady=8)
+                        color=C_SUCCESS, width=230, height=62).pack(pady=8)
 
         make_nav_button(controls, "← BACK",
                         command=self._back,
@@ -1535,16 +1536,40 @@ class ControllerSettingsScreen(BaseScreen):
 
 class BotSettingsScreen(BaseScreen):
     """
-    Placeholder screen for future robot-side configuration options.
+    Sub-menu for robot-side configuration.
+    Routes to Boundary Settings and Home Settings sub-screens.
+    """
+    def __init__(self, parent, app, app_state: AppState):
+        super().__init__(parent, app, app_state)
 
-    TODO: Define what bot settings should be exposed here once the Pi-side
-          settings API is designed. Candidates:                                         
-          - Steering angle limits
-          - Motor speed caps
-          - Kalman filter tuning parameters
-          Add a new DataPacket type (e.g. "bot_config") to send values to Pi.
+        center = ctk.CTkFrame(self, fg_color="transparent")
+        center.place(relx=0.5, rely=0.5, anchor="center")
 
-          Settings needs : sensors data, battery lifespan data, encoder, actuator lifespan, uwb status/connection
+        ctk.CTkLabel(center, text="BOT SETTINGS",
+                     font=("Arial Bold", 30),
+                     text_color=C_TEXT).pack(pady=(0, 50))
+
+        make_nav_button(center, "BOUNDARY SETTINGS",
+                        command=lambda: self.show(BoundarySettingsScreen)).pack(pady=14)
+
+        make_nav_button(center, "HOME SETTINGS",
+                        command=lambda: self.show(HomeSettingsScreen)).pack(pady=14)
+
+        make_nav_button(center, "← BACK",
+                        command=lambda: self.show(SettingsSubMenuScreen),
+                        color=C_PRIMARY, width=220, height=65).pack(pady=(50, 0))
+
+
+# ============================================================
+# SCREEN 10a: BOUNDARY SETTINGS
+# ============================================================
+
+class BoundarySettingsScreen(BaseScreen):
+    """
+    Placeholder screen for boundary configuration options.
+
+    TODO: Define boundary parameters to expose once the Pi-side API is designed.
+          Candidates: field boundary coordinates, fence limits, no-go zones.
     """
     def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
@@ -1552,15 +1577,44 @@ class BotSettingsScreen(BaseScreen):
         card = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16)
         card.place(relx=0.5, rely=0.5, anchor="center", width=520, height=300)
 
-        ctk.CTkLabel(card, text="BOT SETTINGS",
+        ctk.CTkLabel(card, text="BOUNDARY SETTINGS",
                      font=("Arial Bold", 28),
                      text_color=C_TEXT).pack(pady=(40, 16))
 
-        ctk.CTkLabel(card, text="Bot-specific settings coming soon.",
+        ctk.CTkLabel(card, text="Boundary settings coming soon.",
                      font=("Arial", 18), text_color=C_MUTED).pack(pady=20)
 
         make_nav_button(card, "← BACK",
-                        command=lambda: self.show(SettingsSubMenuScreen),
+                        command=lambda: self.show(BotSettingsScreen),
+                        color=C_PRIMARY, width=220, height=65).pack(pady=24)
+
+
+# ============================================================
+# SCREEN 10b: HOME SETTINGS
+# ============================================================
+
+class HomeSettingsScreen(BaseScreen):
+    """
+    Placeholder screen for home position configuration options.
+
+    TODO: Define home settings to expose once the Pi-side API is designed.
+          Candidates: home position coordinates, return speed, home trigger behavior.
+    """
+    def __init__(self, parent, app, app_state: AppState):
+        super().__init__(parent, app, app_state)
+
+        card = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16)
+        card.place(relx=0.5, rely=0.5, anchor="center", width=520, height=300)
+
+        ctk.CTkLabel(card, text="HOME SETTINGS",
+                     font=("Arial Bold", 28),
+                     text_color=C_TEXT).pack(pady=(40, 16))
+
+        ctk.CTkLabel(card, text="Home settings coming soon.",
+                     font=("Arial", 18), text_color=C_MUTED).pack(pady=20)
+
+        make_nav_button(card, "← BACK",
+                        command=lambda: self.show(BotSettingsScreen),
                         color=C_PRIMARY, width=220, height=65).pack(pady=24)
 
 
@@ -1570,28 +1624,27 @@ class BotSettingsScreen(BaseScreen):
 
 class KFXSettingsScreen(BaseScreen):
     """
-    Lets the user assign saved routes to KFX remote buttons 3–8.
+    Lets the user assign saved routes to KFX remote buttons 1–6.
 
-    Button 1 = START         (hardcoded on Pi – shown greyed, not assignable)
-    Button 2 = E STOP  (hardcoded on Pi – shown greyed, not assignable)
-    Button 3 = RETURN HOME  (hardcoded on Pi – shown greyed, not assignable)
-    Buttons 4–8 = user-assignable to any saved route
+    Buttons 1–6 = user-assignable to any saved route
+    Button 7 = reserved (hardcoded on Pi – shown greyed, not assignable)
+    Button 8 = reserved (hardcoded on Pi – shown greyed, not assignable)
 
     Interaction flow:
-      1. Tap a numbered button on the phone graphic (3–8) → gold highlight
+      1. Tap a numbered button on the phone graphic (1–6) → gold highlight
       2. Tap a route row in the table → assigns that route to the button
       3. Press SAVE & SEND → persists kfx_config.json + sends kfx_config packet
 
     Packet sent on SAVE:
       DataPacket(type="kfx_config",
-                 json_data='{"3": route_id_or_null, ..., "8": route_id_or_null}')
+                 json_data='{"1": route_id_or_null, ..., "6": route_id_or_null}')
 
     Pi side is handled by Comms/KFX.py (KFXController) which:
                - Receives 'kfx_config' via PiCommThread and persists it
                - Sends 'kfx_ack' back so this screen can confirm the save
                - Listens on /dev/ttyAMA0 for raw KFX button bytes (ASCII 49–56)
-               - Button 1 → DISABLED, Button 2 → RETURN HOME (path_id=-1)
-               - Buttons 3–8 → AUTONOMOUS with the user-assigned path_id
+               - Buttons 1–6 → AUTONOMOUS with the user-assigned path_id
+               - Buttons 7–8 → reserved/hardcoded behavior on Pi
     """
     def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
@@ -1649,13 +1702,13 @@ class KFXSettingsScreen(BaseScreen):
         """
         Renders a stylized phone body containing an 8-button grid.
         Layout matches image 5 in the reference screenshots:
-          Row 0: 7 | 8
+          Row 0: 7 | 8   (both reserved/greyed)
           Row 1: 5 | 6
-          Row 2: 3 | 4   
-          Row 3: 1 | 2   (both locked/greyed)
+          Row 2: 3 | 4
+          Row 3: 1 | 2
 
-        Buttons 1–2 are disabled (state="disabled") to show they are fixed.
-        Buttons 3–8 are interactive and highlighted gold when selected.
+        Buttons 7–8 are disabled (state="disabled") to show they are reserved.
+        Buttons 1–6 are interactive and highlighted gold when selected.
         """
         #ctk.CTkLabel(parent, text="KFX REMOTE",
         #             font=("Arial Bold", 18),
@@ -1684,7 +1737,7 @@ class KFXSettingsScreen(BaseScreen):
         ]
 
         for label, num_str, row, col in btn_layout:
-            locked = num_str in ("1", "2")
+            locked = num_str in ("7", "8")
 
             if locked:
                 btn = ctk.CTkButton(
@@ -1711,7 +1764,7 @@ class KFXSettingsScreen(BaseScreen):
 
         # Small legend at bottom of phone body explaining the fixed buttons.
         ctk.CTkLabel(phone_body,
-                     text="1=START  |  2=STOP",
+                     text="7=RESERVED  |  8=RESERVED",
                      font=("Arial", 12), text_color=C_MUTED).place(
             relx=0.5, rely=0.94, anchor="center"
         )
@@ -1747,7 +1800,7 @@ class KFXSettingsScreen(BaseScreen):
                      text_color=C_TEXT).pack(pady=(16, 4))
 
         ctk.CTkLabel(parent,
-                     text="① Select a remote button (3–8)\n② Tap a route to assign it",
+                     text="① Select a remote button (1–6)\n② Tap a route to assign it",
                      font=("Arial", 13), text_color=C_MUTED,
                      justify="center").pack(pady=(0, 10))
 
