@@ -1,11 +1,6 @@
 Remove as we finish thingys
 ---------------------------
-
-1. Battery Icons
-- Update them both not to be emojis if we can make them progress bars but distiguisable so maybe a outline bull
-- Controller outline that fills
-- Keep percents by them
-2. Start up check
+5. Start up check
 - The ping thing i talked about, don't leave the start screen until we connect with the ping
 - pi send its battery SoC to repsond so the controller is updated
 3. Boundary defining for arena
@@ -29,8 +24,11 @@ Remove as we finish thingys
 10. OPTIONAL... Sensor fault
 - Save for later
 - if there is a sensor fault display on the user screen fault in X sensor cannot run routes only free drive or something
+1. Battery Icons
+- Update them both not to be emojis if we can make them progress bars but distiguisable so maybe a outline bull
+- Controller outline that fills
+- Keep percents by them
 
-Controller stuffs
 -----------------
 1. CONTROLLER SETTINGS...
 - Do we need this or just delete it
