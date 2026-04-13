@@ -2707,7 +2707,7 @@ class BoundarySettingsScreen(BaseScreen):
         self._entries: list[tuple] = []   # list of (x_entry, y_entry) per corner
 
         corner_labels = ["Corner 1\n(Top-Left)", "Corner 2\n(Top-Right)",
-                         "Corner 3\n(Bottom-Right)", "Corner 4\n(Bottom-Left)"]
+                         "Corner 3\n(Bottom-Left)", "Corner 4\n(Bottom-Right)"]
 
         for i, label in enumerate(corner_labels):
             col = i % 2
