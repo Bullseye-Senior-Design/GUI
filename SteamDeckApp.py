@@ -17,13 +17,11 @@
 #   kfx_config.json – maps KFX button number ("3"–"8") → route_id or null
 #
 # ============================================================
-# TOGGLE FLAGS  –  change only these two lines to flip behavior
+# TOGGLE FLAGS
 # ============================================================
-DEBUG_OVERLAY      = False    # Show semi-transparent TX log overlay on screen
+DEBUG_OVERLAY      = True    # Show semi-transparent TX log overlay on screen
 REQUIRE_CONNECTION = False   # True = halt on missing XBee; False = UI-only mode
-FAKE_ROUTE_SAVE    = False   # True = skip Pi; FINISH ROUTE immediately generates a random route ID
 STARTUP            = True    # True = show START button (debug bypass); False = lock on startup until ping_ack
-FAKE_PI            = True    # True = FakePiResponder auto-replies to all ack packets (no hardware needed)
 KFX_SPEED          = 0.5     # Global KFX run speed (0.0–1.0); sent to Pi via kfx_speed packet
 # ============================================================
 
@@ -37,11 +35,9 @@ import json
 import time
 import os
 import sys
-import subprocess
 from pathlib import Path
 from collections import deque
 from PIL import Image
-from PIL import Image, ImageTk
 
 
 # ── Package path so Comms/Robot imports resolve from project root ─────────────
@@ -52,7 +48,6 @@ from Models.StateData import State, StateData
 from Models.BatteryData import BatteryData
 from Models.DataPacket import DataPacket
 from Models.PingAckData import PingAckData
-from Models.BoundaryData import BoundaryData, BoundaryCorner
 from Models.PosData import PosData
 from Models.HomeCheckResult import HomeCheckResult
 from Constants import Constants
@@ -584,165 +579,6 @@ class SerialRXThread(threading.Thread):
 
     def stop(self):
         self._running = False
-
-
-# ============================================================
-# FAKE PI RESPONDER  –  simulates Pi responses without hardware
-# ============================================================
-
-class FakePiResponder(threading.Thread):
-    """
-    When FAKE_PI=True this thread watches the TX queue (via a tap on
-    app_state.tx_queue) and injects fake Pi responses into event_queue
-    after a short delay, exactly as if the Pi had received and replied.
-
-    Supported packets and their fake replies:
-      ping            → ping_ack  (soc=85.0)
-      set_boundary    → boundary_ack
-      request_pos     → pos_data  (x=3.5, y=2.1, yaw=47.0)
-      set_home        → home_ack
-      record_home_check → record_home_check_result (ok=True)
-      record_start    → path_created  (random route id)
-      kfx_config      → kfx_ack
-
-    All responses are injected after FAKE_REPLY_DELAY_MS milliseconds.
-    """
-
-    FAKE_REPLY_DELAY_MS = 600
-
-    def __init__(self, app_state: AppState):
-        super().__init__(daemon=True, name="FakePiResponder")
-        self.app_state = app_state
-        self._running  = True
-        # Shadow queue so we can peek at outgoing packets without
-        # interrupting SerialTXThread (which also drains tx_queue).
-        # We replace tx_queue with a PassthroughQueue that copies each
-        # put() item to us as well.
-        self._fake_queue: queue.Queue = queue.Queue()
-
-    def _install_tap(self):
-        """
-        Wrap app_state.tx_queue so every put() also lands in our
-        _fake_queue.  Called once before the thread starts.
-        """
-        original_queue = self.app_state.tx_queue
-
-        class TappedQueue(queue.Queue):
-            def __init__(self, original, tap):
-                # Re-use the original queue's internals
-                super().__init__()
-                self._orig  = original
-                self._tap   = tap
-                # Copy over the existing queue's deque so nothing in
-                # flight is lost.
-                with original.mutex:
-                    self.queue = type(original.queue)(original.queue)
-
-            # Forward all reads to the original so SerialTXThread works
-            def get(self, block=True, timeout=None):
-                return self._orig.get(block, timeout)
-            def get_nowait(self):
-                return self._orig.get_nowait()
-            def task_done(self):
-                return self._orig.task_done()
-            def join(self):
-                return self._orig.join()
-            def qsize(self):
-                return self._orig.qsize()
-            def empty(self):
-                return self._orig.empty()
-
-            # Intercept writes – send to both original and tap
-            def put(self, item, block=True, timeout=None):
-                self._orig.put(item, block, timeout)
-                try:
-                    self._tap.put_nowait(item)
-                except queue.Full:
-                    pass
-            def put_nowait(self, item):
-                self._orig.put_nowait(item)
-                try:
-                    self._tap.put_nowait(item)
-                except queue.Full:
-                    pass
-
-        self.app_state.tx_queue = TappedQueue(original_queue, self._fake_queue)
-
-    def run(self):
-        import random
-        while self._running:
-            try:
-                packet: DataPacket = self._fake_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-
-            delay_s = self.FAKE_REPLY_DELAY_MS / 1000.0
-            ptype   = packet.type
-
-            def _inject(pt=ptype):
-                time.sleep(delay_s)
-                eq = self.app_state.event_queue
-
-                if pt == "ping":
-                    with self.app_state.lock:
-                        self.app_state.connected = True
-                        self.app_state.battery.state_of_charge = 85.0
-                    eq.put({"type": "ping_ack"})
-                    print(f"[FAKE PI] → ping_ack (soc=85%)")
-
-                elif pt == "set_boundary":
-                    eq.put({"type": "boundary_ack"})
-                    print(f"[FAKE PI] → boundary_ack")
-
-                elif pt == "request_pos":
-                    eq.put({"type": "pos_data", "x": 3.5, "y": 2.1, "yaw": 47.0})
-                    print(f"[FAKE PI] → pos_data (3.5, 2.1, 47°)")
-
-                elif pt == "set_home":
-                    eq.put({"type": "home_ack"})
-                    print(f"[FAKE PI] → home_ack")
-
-                elif pt == "record_home_check":
-                    eq.put({"type": "record_home_check_result", "ok": True})
-                    print(f"[FAKE PI] → record_home_check_result ok=True")
-
-                elif pt == "record_start":
-                    fake_id = random.randint(100, 999)
-                    eq.put({"type": "path_created", "route_id": fake_id})
-                    print(f"[FAKE PI] → path_created id={fake_id}")
-
-                elif pt == "kfx_config":
-                    eq.put({"type": "kfx_ack"})
-                    print(f"[FAKE PI] → kfx_ack")
-
-                elif pt == "request_battery":
-                    # Inject a fake battery packet directly into app_state
-                    # (same path as real serial RX)
-                    fake_batt = BatteryData(
-                        voltage=25.2, current=3.1, power=78.1,
-                        state_of_charge=85.0, time_remaining=120.0,
-                    )
-                    with self.app_state.lock:
-                        self.app_state.battery = fake_batt
-                    eq.put({
-                        "type": "battery_update",
-                        "voltage": fake_batt.voltage,
-                        "current": fake_batt.current,
-                        "power": fake_batt.power,
-                        "state_of_charge": fake_batt.state_of_charge,
-                        "time_remaining": fake_batt.time_remaining,
-                    })
-                    print(f"[FAKE PI] → battery_update (85%, 25.2V)")
-
-                elif pt == "kfx_speed":
-                    eq.put({"type": "kfx_speed_ack"})
-                    print(f"[FAKE PI] → kfx_speed_ack")
-
-            threading.Thread(target=_inject, daemon=True).start()
-
-    def stop(self):
-        self._running = False
-
 
 # ============================================================
 # PACKET HELPERS  –  GUI callbacks use these, not the queue directly
@@ -1731,12 +1567,6 @@ class RecordRouteScreen(BaseScreen):
         with self.state.lock:
             self.state.joystick_active = False
 
-        if FAKE_ROUTE_SAVE:
-            import random
-            fake_id = random.randint(1000, 9999)
-            self.show(NameRouteScreen, route_id=fake_id)
-            return
-
         enqueue_packet(self.state, "record_finish")
         self._status_label.configure(
             text="SAVING ROUTE...\nWaiting for Pi confirmation",
@@ -2040,62 +1870,96 @@ class RunRouteScreen(BaseScreen):
                         command=self._back,
                         color=C_PRIMARY, width=230, height=62).pack(pady=(20, 0))
 
+        # ── Full-screen dim backdrop (shared by all three overlays) ──────────
+        self._modal_backdrop = ctk.CTkFrame(self, fg_color="#0d0d0d", corner_radius=0)
+        # Not placed yet — shown via _show_backdrop() whenever a modal opens
+
         # ── Home-check result overlay (shown after check fails) ───────────
-        self._check_overlay = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16,
-                                            width=600, height=240)
+        self._check_overlay = ctk.CTkFrame(
+            self, fg_color=C_SURFACE, corner_radius=20,
+            width=660, height=260,
+            border_width=2, border_color=C_DANGER,
+        )
         self._check_overlay_lbl = ctk.CTkLabel(
             self._check_overlay, text="",
-            font=("Arial Bold", 22), text_color=C_DANGER,
-            wraplength=540, justify="center",
+            font=("Arial Bold", 24), text_color=C_DANGER,
+            wraplength=600, justify="center",
         )
-        self._check_overlay_lbl.pack(pady=(28, 8))
+        self._check_overlay_lbl.pack(pady=(32, 6))
         self._check_detail_lbl = ctk.CTkLabel(
             self._check_overlay, text="",
             font=("Arial", 16), text_color=C_MUTED,
-            wraplength=540, justify="center",
+            wraplength=600, justify="center",
         )
-        self._check_detail_lbl.pack(pady=(0, 8))
-        make_nav_button(self._check_overlay, "OK",
-                        command=self._dismiss_check_overlay,
-                        color=C_PRIMARY, width=160, height=55).pack(pady=(0, 24))
+        self._check_detail_lbl.pack(pady=(0, 10))
+        ctk.CTkButton(
+            self._check_overlay, text="OK",
+            command=self._dismiss_check_overlay,
+            font=("Arial Bold", 22), fg_color=C_PRIMARY,
+            hover_color=C_SECONDARY, text_color=C_TEXT,
+            corner_radius=12, width=160, height=55,
+        ).pack(pady=(0, 28))
 
         # ── Run-confirm overlay (shown after home check passes) ───────────
-        self._run_confirm_frame = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16,
-                                                width=560, height=240)
+        self._run_confirm_frame = ctk.CTkFrame(
+            self, fg_color=C_SURFACE, corner_radius=20,
+            width=580, height=260,
+            border_width=2, border_color=C_SUCCESS,
+        )
         self._run_confirm_lbl = ctk.CTkLabel(
             self._run_confirm_frame, text="",
             font=("Arial Bold", 22), text_color=C_TEXT,
-            wraplength=520, justify="center",
+            wraplength=540, justify="center",
         )
-        self._run_confirm_lbl.pack(pady=(28, 4))
+        self._run_confirm_lbl.pack(pady=(32, 4))
         self._run_confirm_detail = ctk.CTkLabel(
             self._run_confirm_frame, text="",
             font=("Arial", 16), text_color=C_MUTED,
         )
         self._run_confirm_detail.pack(pady=(0, 12))
         rcfm_btns = ctk.CTkFrame(self._run_confirm_frame, fg_color="transparent")
-        rcfm_btns.pack(pady=(0, 24))
-        make_nav_button(rcfm_btns, "CANCEL",
-                        command=self._cancel_run_confirm,
-                        color=C_DANGER, width=160, height=60).pack(side="left", padx=16)
-        make_nav_button(rcfm_btns, "START",
-                        command=self._confirmed_run,
-                        color=C_SUCCESS, width=160, height=60).pack(side="right", padx=16)
+        rcfm_btns.pack(pady=(0, 28))
+        ctk.CTkButton(
+            rcfm_btns, text="CANCEL",
+            command=self._cancel_run_confirm,
+            font=("Arial Bold", 22), fg_color=C_DANGER,
+            hover_color="#991a00", text_color=C_TEXT,
+            corner_radius=12, width=160, height=60,
+        ).pack(side="left", padx=16)
+        ctk.CTkButton(
+            rcfm_btns, text="START",
+            command=self._confirmed_run,
+            font=("Arial Bold", 22), fg_color=C_SUCCESS,
+            hover_color=C_TERTIARY, text_color=C_TEXT,
+            corner_radius=12, width=160, height=60,
+        ).pack(side="right", padx=16)
 
         # ── HOME confirm overlay ──────────────────────────────────────────
-        self._confirm_frame = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16,
-                                            width=520, height=200)
+        self._confirm_frame = ctk.CTkFrame(
+            self, fg_color=C_SURFACE, corner_radius=20,
+            width=540, height=220,
+            border_width=2, border_color=C_SUCCESS,
+        )
         ctk.CTkLabel(self._confirm_frame,
                      text="Send Bullseye back to its home position?",
-                     font=("Arial Bold", 24), text_color=C_TEXT).pack(pady=(28, 8))
+                     font=("Arial Bold", 22), text_color=C_TEXT,
+                     wraplength=500, justify="center").pack(pady=(32, 8))
         cfm_btns = ctk.CTkFrame(self._confirm_frame, fg_color="transparent")
         cfm_btns.pack(pady=(8, 28))
-        make_nav_button(cfm_btns, "CANCEL",
-                        command=self._cancel_home_confirm,
-                        color=C_DANGER, width=160, height=60).pack(side="left", padx=16)
-        make_nav_button(cfm_btns, "CONFIRM",
-                        command=self._confirmed_return_home,
-                        color=C_SUCCESS, width=160, height=60).pack(side="right", padx=16)
+        ctk.CTkButton(
+            cfm_btns, text="CANCEL",
+            command=self._cancel_home_confirm,
+            font=("Arial Bold", 22), fg_color=C_DANGER,
+            hover_color="#991a00", text_color=C_TEXT,
+            corner_radius=12, width=160, height=60,
+        ).pack(side="left", padx=16)
+        ctk.CTkButton(
+            cfm_btns, text="CONFIRM",
+            command=self._confirmed_return_home,
+            font=("Arial Bold", 22), fg_color=C_SUCCESS,
+            hover_color=C_TERTIARY, text_color=C_TEXT,
+            corner_radius=12, width=160, height=60,
+        ).pack(side="right", padx=16)
 
     def _build_route_list(self):
         """Populate the scrollable route list from app_state.routes."""
@@ -2359,6 +2223,16 @@ class RunRouteScreen(BaseScreen):
         except Exception:
             pass
 
+    # ── Modal backdrop helpers ─────────────────────────────────────────────
+
+    def _show_backdrop(self):
+        self._modal_backdrop.place(x=0, y=0, relwidth=1, relheight=1)
+
+    def _hide_backdrop(self):
+        self._modal_backdrop.place_forget()
+
+    # ── Check-failed overlay ───────────────────────────────────────────────
+
     def _show_check_failed(self, timed_out: bool):
         """Home check failed — show overlay with reason, re-enable RUN."""
         self._run_btn.configure(state="normal")
@@ -2377,11 +2251,15 @@ class RunRouteScreen(BaseScreen):
                 detail = "No home position set.\nGo to Settings → Bot Settings → Home Settings."
             self._check_overlay_lbl.configure(text="NOT AT HOME POSITION")
             self._check_detail_lbl.configure(text=detail)
+        self._show_backdrop()
         self._check_overlay.place(relx=0.5, rely=0.5, anchor="center")
         self._check_overlay.lift()
 
     def _dismiss_check_overlay(self):
         self._check_overlay.place_forget()
+        self._hide_backdrop()
+
+    # ── Run-confirm overlay ────────────────────────────────────────────────
 
     def _show_run_confirm(self):
         """Home check passed — show run-confirm overlay with route name + speed."""
@@ -2389,23 +2267,24 @@ class RunRouteScreen(BaseScreen):
             entry = self.state.routes.get(str(self._selected_id), {})
         name = entry.get("name", f"Route {self._selected_id}") if isinstance(entry, dict) else str(entry)
         speed_pct = int(self._speed_slider.get())
-        self._run_confirm_lbl.configure(
-            text=f"Run  \"{name}\"?"
-        )
+        self._run_confirm_lbl.configure(text=f"Run  \"{name}\"?")
         self._run_confirm_detail.configure(
             text=f"Speed: {speed_pct}%    Route ID: {self._selected_id}"
         )
+        self._show_backdrop()
         self._run_confirm_frame.place(relx=0.5, rely=0.5, anchor="center")
         self._run_confirm_frame.lift()
 
     def _cancel_run_confirm(self):
         self._run_confirm_frame.place_forget()
+        self._hide_backdrop()
         self._run_btn.configure(state="normal")
         self._home_btn.configure(state="normal")
 
     def _confirmed_run(self):
         """User confirmed — send AUTONOMOUS and switch to running UI."""
         self._run_confirm_frame.place_forget()
+        self._hide_backdrop()
         speed = self._speed_slider.get() / 100.0
         enqueue_state(self.state, State.AUTONOMOUS,
                       path_id=self._selected_id, path_speed=speed)
@@ -2433,15 +2312,18 @@ class RunRouteScreen(BaseScreen):
 
     def _press_return_home(self):
         """Show confirm overlay before returning home."""
+        self._show_backdrop()
         self._confirm_frame.place(relx=0.5, rely=0.5, anchor="center")
         self._confirm_frame.lift()
 
     def _cancel_home_confirm(self):
         self._confirm_frame.place_forget()
+        self._hide_backdrop()
 
     def _confirmed_return_home(self):
         """Confirmed — send RETURN_TO_HOME state and switch to running UI."""
         self._confirm_frame.place_forget()
+        self._hide_backdrop()
         enqueue_state(self.state, State.RETURN_TO_HOME)
         self._is_running = True
         self._run_btn.pack_forget()
@@ -3350,6 +3232,13 @@ class KFXSettingsScreen(BaseScreen):
         bottom = ctk.CTkFrame(self, fg_color="transparent")
         bottom.pack(side="bottom", pady=18)
 
+        # Status label sits just above the bottom bar and shows send/error feedback
+        self._status_lbl = ctk.CTkLabel(
+            self, text="",
+            font=("Arial", 16), text_color=C_MUTED,
+        )
+        self._status_lbl.pack(side="bottom", pady=(0, 4))
+
         make_nav_button(bottom, "← BACK",
                         command=lambda: self.show(SettingsSubMenuScreen),
                         color=C_PRIMARY, width=210, height=62).pack(side="left", padx=20)
@@ -3632,21 +3521,19 @@ class KFXSettingsScreen(BaseScreen):
         if self._waiting_for_ack:
             return   # Ignore double-taps while waiting
         self._waiting_for_ack = True
-        self._ack_timeout_remaining = 20   # 20 × 500 ms = 10 s total timeout
+        self._ack_timeout_remaining = ACK_TIMEOUT_MS // 200   # ticks at 200 ms each
 
-        # Disable button and show sending state so the user knows it's working
         self._save_btn.configure(state="disabled", text="SENDING...")
+        self._status_lbl.configure(text="Sending KFX config to Bullseye...", text_color=C_MUTED)
 
-        # Send packet – SerialTXThread will transmit on its next cycle
         payload = json.dumps(self._config)
         enqueue_packet(self.state, "kfx_config", payload)
 
-        # Start polling for the ack
         self._poll_ack()
 
     def _poll_ack(self):
         """
-        Poll event_queue every 500 ms for 'kfx_ack' from the Pi.
+        Poll event_queue every 200 ms for 'kfx_ack' from the Pi.
         Stops on ack (success), timeout (failure), or frame destruction.
         """
         # ── Check for ack in queue ────────────────────────────────────────
@@ -3679,18 +3566,18 @@ class KFXSettingsScreen(BaseScreen):
         # ── Timeout check ─────────────────────────────────────────────────
         self._ack_timeout_remaining -= 1
         if self._ack_timeout_remaining <= 0:
-            # Timed out – re-enable button so user can try again
             self._waiting_for_ack = False
             self._save_btn.configure(state="normal", text="SAVE & SEND")
-            # Flash button red briefly to signal the failure
-            self._save_btn.configure(fg_color=C_DANGER)
-            self.after(1000, lambda: self._save_btn.configure(fg_color=C_SECONDARY))
+            self._status_lbl.configure(
+                text="No response from Bullseye — config not saved. Try again.",
+                text_color=C_DANGER,
+            )
             print("[KFX] No ack received within timeout – Pi may be disconnected")
             return
 
         # ── Reschedule ───────────────────────────────────────────────────
         try:
-            self.after(500, self._poll_ack)
+            self.after(200, self._poll_ack)
         except Exception:
             pass   # Widget destroyed during navigation – stop silently
 
@@ -4182,16 +4069,6 @@ class BullseyeApp(ctk.CTk):
                        Returns None on Windows; label shows '--' in that case.
         """
         try:
-            # ── Robot battery (from Pi over XBee) ────────────────────────
-            #with self.app_state.lock:
-            #    robot_soc = self.app_state.battery.state_of_charge
-            #self._robot_batt_lbl.configure(text=f"🤖 {robot_soc:.0f}%")
-
-            # ── Steam Deck battery (Linux sysfs) ─────────────────────────
-            #deck_soc = get_steamdeck_battery()
-            #deck_text = f"🎮 {deck_soc}%" if deck_soc is not None else "🎮 --%"
-            #self._deck_batt_lbl.configure(text=deck_text)
-
             with self.app_state.lock:
                 robot_soc = self.app_state.battery.state_of_charge
             self._robot_batt_lbl.configure(text=f"{robot_soc:.0f}%")
@@ -4328,13 +4205,6 @@ def main():
     joystick_thread.start()
     tx_thread.start()
     rx_thread.start()
-
-    # ── Fake Pi responder (debug only) ────────────────────────────────────
-    if FAKE_PI:
-        fake_pi = FakePiResponder(app_state)
-        fake_pi._install_tap()
-        fake_pi.start()
-        print("[FAKE PI] Active – all Pi acks will be auto-injected")
 
     # ── GUI (blocks until window is closed) ───────────────────────────────
     app = BullseyeApp(app_state, joystick_thread, tx_thread, rx_thread)
