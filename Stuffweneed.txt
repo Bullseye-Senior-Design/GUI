@@ -14,7 +14,7 @@ Remove as we finish thingys
 - Will show the arena as just a rectangle with maybe the dimensions
 - Show the home position as a green dot with an arrow pointing towards the theta
 - CANNOT EDIT without using freedrive to reset
-6. Error messages added when messages are not received... (KFX, Route Saved, Home position, Connect ping)
+6. Error messages added when messages are not received... (KFX, Route Saved, Home position, Connect ping) 
 
 9. Data Packet Dropout
 - Currently operatable but not good practice

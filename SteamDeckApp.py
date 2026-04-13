@@ -22,6 +22,9 @@
 DEBUG_OVERLAY      = False    # Show semi-transparent TX log overlay on screen
 REQUIRE_CONNECTION = False   # True = halt on missing XBee; False = UI-only mode
 FAKE_ROUTE_SAVE    = False   # True = skip Pi; FINISH ROUTE immediately generates a random route ID
+STARTUP            = True    # True = show START button (debug bypass); False = lock on startup until ping_ack
+FAKE_PI            = True    # True = FakePiResponder auto-replies to all ack packets (no hardware needed)
+KFX_SPEED          = 0.5     # Global KFX run speed (0.0–1.0); sent to Pi via kfx_speed packet
 # ============================================================
 
 import customtkinter as ctk
@@ -48,6 +51,10 @@ from Models.ControllerData import ControllerData
 from Models.StateData import State, StateData
 from Models.BatteryData import BatteryData
 from Models.DataPacket import DataPacket
+from Models.PingAckData import PingAckData
+from Models.BoundaryData import BoundaryData, BoundaryCorner
+from Models.PosData import PosData
+from Models.HomeCheckResult import HomeCheckResult
 from Constants import Constants
 
 # ============================================================
@@ -61,6 +68,8 @@ DEADZONE   = Constants.controller_deadzone       # joystick axis dead-band
 RECORD_FINISH_TIMEOUT = 10.0                    # seconds to wait for Pi path_created ack
 PORT       = Constants.controller_serial_port    # XBee USB serial port
 BAUD       = Constants.serial_baud_rate          # XBee baud rate
+PING_INTERVAL_MS  = 500                          # ms between ping packets on startup screen
+ACK_TIMEOUT_MS    = 1000                         # ms before any ack is considered timed out
 
 # ── Color palette ─────────────────────────────────────────────────────────────
 C_PRIMARY   = "#5c5c5c"   # Dark grey   – inactive buttons, phone body
@@ -76,6 +85,8 @@ C_SUCCESS   = "#1a7a1a"   # Green       – set home, positive/confirm actions
 # ── Local storage file paths ──────────────────────────────────────────────────
 ROUTES_FILE     = Path(__file__).parent / "routes.json"
 KFX_CONFIG_FILE = Path(__file__).parent / "kfx_config.json"
+BOUNDARY_FILE   = Path(__file__).parent / "boundary.json"
+HOME_FILE       = Path(__file__).parent / "home.json"
 
 # ============================================================
 # DELTA ENCODING  –  mirrors ControllerMessager.py exactly
@@ -118,14 +129,16 @@ def _build_delta(current: ControllerData, previous: ControllerData | None) -> di
 
 def load_routes() -> dict:
     """
-    Load route_id → name mapping from routes.json.
+    Load route_id → {name, home} mapping from routes.json.
+    Automatically migrates old format (route_id → name string) to new schema.
     Returns an empty dict if the file does not yet exist or cannot be parsed.
     Keys are stored as strings (JSON requirement); callers convert as needed.
     """
     if ROUTES_FILE.exists():
         try:
             with open(ROUTES_FILE, "r") as f:
-                return json.load(f)
+                raw = json.load(f)
+            return migrate_routes(raw)
         except Exception as e:
             print(f"[STORAGE] Could not load routes.json: {e}")
     return {}
@@ -166,6 +179,71 @@ def save_kfx_config(config: dict):
             json.dump(config, f, indent=2)
     except Exception as e:
         print(f"[STORAGE] Could not save kfx_config.json: {e}")
+
+
+def load_boundary() -> dict | None:
+    """
+    Load boundary corners from boundary.json.
+    Returns a dict with a 'corners' list, or None if not set yet.
+    """
+    if BOUNDARY_FILE.exists():
+        try:
+            with open(BOUNDARY_FILE, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[STORAGE] Could not load boundary.json: {e}")
+    return None
+
+
+def save_boundary(boundary: dict):
+    """Persist boundary corners to boundary.json."""
+    try:
+        with open(BOUNDARY_FILE, "w") as f:
+            json.dump(boundary, f, indent=2)
+    except Exception as e:
+        print(f"[STORAGE] Could not save boundary.json: {e}")
+
+
+def load_home() -> dict | None:
+    """
+    Load home position from home.json.
+    Returns a dict with x, y, yaw, or None if not set yet.
+    """
+    if HOME_FILE.exists():
+        try:
+            with open(HOME_FILE, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[STORAGE] Could not load home.json: {e}")
+    return None
+
+
+def save_home(home: dict):
+    """Persist home position to home.json."""
+    try:
+        with open(HOME_FILE, "w") as f:
+            json.dump(home, f, indent=2)
+    except Exception as e:
+        print(f"[STORAGE] Could not save home.json: {e}")
+
+
+def migrate_routes(raw: dict) -> dict:
+    """
+    Ensure routes.json is in the new schema:
+      {"route_id": {"name": str, "home": {x, y, yaw} | None}}
+    Old format was {"route_id": "name"} (plain string value).
+    Converts any plain-string entries in place so the rest of the app
+    can always assume the new structure.
+    """
+    migrated = {}
+    for k, v in raw.items():
+        if isinstance(v, str):
+            # Old format — wrap it
+            migrated[k] = {"name": v, "home": None}
+        else:
+            # Already new format — ensure 'home' key exists
+            migrated[k] = {"name": v.get("name", ""), "home": v.get("home", None)}
+    return migrated
 
 
 # ============================================================
@@ -222,8 +300,17 @@ class AppState:
         self.debug_log: deque = deque(maxlen=5)
 
         # ── Route and KFX data (loaded from local JSON on startup) ────────
-        self.routes: dict = load_routes()       # {"route_id_str": "name", ...}
+        self.routes: dict = load_routes()       # {"route_id_str": {"name": str, "home": {x,y,yaw}|None}}
         self.kfx_config: dict = load_kfx_config()  # {"3": id_or_None, ...}
+
+        # ── Boundary and home position (loaded from local JSON on startup) ─
+        self.boundary: dict | None = load_boundary()   # {"corners": [{x,y}×4]} or None
+        self.home_pos: dict | None = load_home()       # {"x": f, "y": f, "yaw": f} or None
+
+        # ── Connection state ──────────────────────────────────────────────
+        # True once ping_ack received from Pi. When STARTUP=True this is
+        # bypassed and the user can proceed directly from the startup screen.
+        self.connected: bool = False
 
         # ── E-Stop state ──────────────────────────────────────────────────
         # Set True when the E-STOP overlay button is pressed.
@@ -442,10 +529,17 @@ class SerialRXThread(threading.Thread):
                 batt = BatteryData.model_validate_json(packet.json_data)
                 with self.app_state.lock:
                     self.app_state.battery = batt
+                self.app_state.event_queue.put({
+                    "type": "battery_update",
+                    "voltage": batt.voltage,
+                    "current": batt.current,
+                    "power": batt.power,
+                    "state_of_charge": batt.state_of_charge,
+                    "time_remaining": batt.time_remaining,
+                })
 
             elif packet.type == "path_created":
                 # Pi has finished saving a route; GUI needs the ID to prompt for a name.
-                # Pi sends PathCreated(id=N) via PiCommThread.send_new_path_data().
                 data = json.loads(packet.json_data)
                 self.app_state.event_queue.put({
                     "type": "path_created",
@@ -453,13 +547,198 @@ class SerialRXThread(threading.Thread):
                 })
 
             elif packet.type == "kfx_ack":
-                # Pi confirmed it received and saved the KFX config.
-                # KFXSettingsScreen._save() is polling for this event before
-                # it commits the local config file on the Steam Deck side.
                 self.app_state.event_queue.put({"type": "kfx_ack"})
+
+            elif packet.type == "kfx_speed_ack":
+                self.app_state.event_queue.put({"type": "kfx_speed_ack"})
+
+            elif packet.type == "ping_ack":
+                ack = PingAckData.model_validate_json(packet.json_data)
+                with self.app_state.lock:
+                    self.app_state.connected = True
+                    self.app_state.battery.state_of_charge = ack.state_of_charge
+                self.app_state.event_queue.put({"type": "ping_ack"})
+
+            elif packet.type == "boundary_ack":
+                self.app_state.event_queue.put({"type": "boundary_ack"})
+
+            elif packet.type == "pos_data":
+                pos = PosData.model_validate_json(packet.json_data)
+                self.app_state.event_queue.put({
+                    "type": "pos_data",
+                    "x": pos.x, "y": pos.y, "yaw": pos.yaw,
+                })
+
+            elif packet.type == "home_ack":
+                self.app_state.event_queue.put({"type": "home_ack"})
+
+            elif packet.type == "record_home_check_result":
+                result = HomeCheckResult.model_validate_json(packet.json_data)
+                self.app_state.event_queue.put({
+                    "type": "record_home_check_result",
+                    "ok": result.ok,
+                })
 
         except Exception as e:
             print(f"[RX] Could not parse line: {line!r} → {e}")
+
+    def stop(self):
+        self._running = False
+
+
+# ============================================================
+# FAKE PI RESPONDER  –  simulates Pi responses without hardware
+# ============================================================
+
+class FakePiResponder(threading.Thread):
+    """
+    When FAKE_PI=True this thread watches the TX queue (via a tap on
+    app_state.tx_queue) and injects fake Pi responses into event_queue
+    after a short delay, exactly as if the Pi had received and replied.
+
+    Supported packets and their fake replies:
+      ping            → ping_ack  (soc=85.0)
+      set_boundary    → boundary_ack
+      request_pos     → pos_data  (x=3.5, y=2.1, yaw=47.0)
+      set_home        → home_ack
+      record_home_check → record_home_check_result (ok=True)
+      record_start    → path_created  (random route id)
+      kfx_config      → kfx_ack
+
+    All responses are injected after FAKE_REPLY_DELAY_MS milliseconds.
+    """
+
+    FAKE_REPLY_DELAY_MS = 600
+
+    def __init__(self, app_state: AppState):
+        super().__init__(daemon=True, name="FakePiResponder")
+        self.app_state = app_state
+        self._running  = True
+        # Shadow queue so we can peek at outgoing packets without
+        # interrupting SerialTXThread (which also drains tx_queue).
+        # We replace tx_queue with a PassthroughQueue that copies each
+        # put() item to us as well.
+        self._fake_queue: queue.Queue = queue.Queue()
+
+    def _install_tap(self):
+        """
+        Wrap app_state.tx_queue so every put() also lands in our
+        _fake_queue.  Called once before the thread starts.
+        """
+        original_queue = self.app_state.tx_queue
+
+        class TappedQueue(queue.Queue):
+            def __init__(self, original, tap):
+                # Re-use the original queue's internals
+                super().__init__()
+                self._orig  = original
+                self._tap   = tap
+                # Copy over the existing queue's deque so nothing in
+                # flight is lost.
+                with original.mutex:
+                    self.queue = type(original.queue)(original.queue)
+
+            # Forward all reads to the original so SerialTXThread works
+            def get(self, block=True, timeout=None):
+                return self._orig.get(block, timeout)
+            def get_nowait(self):
+                return self._orig.get_nowait()
+            def task_done(self):
+                return self._orig.task_done()
+            def join(self):
+                return self._orig.join()
+            def qsize(self):
+                return self._orig.qsize()
+            def empty(self):
+                return self._orig.empty()
+
+            # Intercept writes – send to both original and tap
+            def put(self, item, block=True, timeout=None):
+                self._orig.put(item, block, timeout)
+                try:
+                    self._tap.put_nowait(item)
+                except queue.Full:
+                    pass
+            def put_nowait(self, item):
+                self._orig.put_nowait(item)
+                try:
+                    self._tap.put_nowait(item)
+                except queue.Full:
+                    pass
+
+        self.app_state.tx_queue = TappedQueue(original_queue, self._fake_queue)
+
+    def run(self):
+        import random
+        while self._running:
+            try:
+                packet: DataPacket = self._fake_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            delay_s = self.FAKE_REPLY_DELAY_MS / 1000.0
+            ptype   = packet.type
+
+            def _inject(pt=ptype):
+                time.sleep(delay_s)
+                eq = self.app_state.event_queue
+
+                if pt == "ping":
+                    with self.app_state.lock:
+                        self.app_state.connected = True
+                        self.app_state.battery.state_of_charge = 85.0
+                    eq.put({"type": "ping_ack"})
+                    print(f"[FAKE PI] → ping_ack (soc=85%)")
+
+                elif pt == "set_boundary":
+                    eq.put({"type": "boundary_ack"})
+                    print(f"[FAKE PI] → boundary_ack")
+
+                elif pt == "request_pos":
+                    eq.put({"type": "pos_data", "x": 3.5, "y": 2.1, "yaw": 47.0})
+                    print(f"[FAKE PI] → pos_data (3.5, 2.1, 47°)")
+
+                elif pt == "set_home":
+                    eq.put({"type": "home_ack"})
+                    print(f"[FAKE PI] → home_ack")
+
+                elif pt == "record_home_check":
+                    eq.put({"type": "record_home_check_result", "ok": True})
+                    print(f"[FAKE PI] → record_home_check_result ok=True")
+
+                elif pt == "record_start":
+                    fake_id = random.randint(100, 999)
+                    eq.put({"type": "path_created", "route_id": fake_id})
+                    print(f"[FAKE PI] → path_created id={fake_id}")
+
+                elif pt == "kfx_config":
+                    eq.put({"type": "kfx_ack"})
+                    print(f"[FAKE PI] → kfx_ack")
+
+                elif pt == "request_battery":
+                    # Inject a fake battery packet directly into app_state
+                    # (same path as real serial RX)
+                    fake_batt = BatteryData(
+                        voltage=25.2, current=3.1, power=78.1,
+                        state_of_charge=85.0, time_remaining=120.0,
+                    )
+                    with self.app_state.lock:
+                        self.app_state.battery = fake_batt
+                    eq.put({
+                        "type": "battery_update",
+                        "voltage": fake_batt.voltage,
+                        "current": fake_batt.current,
+                        "power": fake_batt.power,
+                        "state_of_charge": fake_batt.state_of_charge,
+                        "time_remaining": fake_batt.time_remaining,
+                    })
+                    print(f"[FAKE PI] → battery_update (85%, 25.2V)")
+
+                elif pt == "kfx_speed":
+                    eq.put({"type": "kfx_speed_ack"})
+                    print(f"[FAKE PI] → kfx_speed_ack")
+
+            threading.Thread(target=_inject, daemon=True).start()
 
     def stop(self):
         self._running = False
@@ -521,8 +800,197 @@ def get_steamdeck_battery() -> int | None:
     return None  # Not on Linux / sysfs not available (Windows dev machine)
 
 
+def enable_touch_scroll(scrollable_frame: ctk.CTkScrollableFrame):
+    """
+    Bind drag-to-scroll on a CTkScrollableFrame so the user can drag the
+    list up/down with a finger or mouse without needing the scrollbar thumb.
+
+    A small movement threshold (8 px) distinguishes a tap from a drag so
+    button click callbacks still fire correctly on light touches.
+
+    Call this after building (or rebuilding) the frame's children so that
+    all child widgets receive the bindings too.
+    """
+    _data = {"start_y": 0, "last_y": 0, "scrolling": False}
+
+    def _on_press(e):
+        _data["start_y"] = e.y_root
+        _data["last_y"]  = e.y_root
+        _data["scrolling"] = False
+
+    def _on_drag(e):
+        total = abs(e.y_root - _data["start_y"])
+        if total > 8:
+            _data["scrolling"] = True
+        if not _data["scrolling"]:
+            return
+        dy = _data["last_y"] - e.y_root
+        _data["last_y"] = e.y_root
+        if dy:
+            try:
+                scrollable_frame._parent_canvas.yview_scroll(int(dy / 6), "units")
+            except Exception:
+                pass
+
+    def _bind_widget(widget):
+        widget.bind("<ButtonPress-1>", _on_press, add="+")
+        widget.bind("<B1-Motion>",     _on_drag,  add="+")
+        for child in widget.winfo_children():
+            _bind_widget(child)
+
+    _bind_widget(scrollable_frame)
+
+
+# ============================================================
+# NUMPAD OVERLAY  –  on-screen number input for entry fields
+# ============================================================
+
+class NumpadOverlay(ctk.CTkToplevel):
+    """
+    A floating numpad window that attaches to a CTkEntry.
+
+    Layout:
+      [ 7 ] [ 8 ] [ 9 ]  [ ⌫ ]
+      [ 4 ] [ 5 ] [ 6 ]  [ C ]
+      [ 1 ] [ 2 ] [ 3 ]  [ - ]
+      [   0   ]  [ . ]   [DONE]
+
+    Usage:
+        NumpadOverlay(root_window, entry_widget)
+
+    The overlay positions itself near the entry on screen.
+    DONE closes it; clicking outside also closes it.
+    Negative toggle (-) prepends/removes a minus sign.
+    """
+
+    _BTN_W  = 72
+    _BTN_H  = 64
+    _PAD    = 6
+
+    def __init__(self, root: tk.Tk, entry: ctk.CTkEntry):
+        super().__init__(root)
+        self._entry = entry
+
+        self.overrideredirect(True)          # no title bar
+        self.attributes("-topmost", True)
+        self.configure(bg=C_SURFACE)
+        self.resizable(False, False)
+
+        # ── Position near the entry widget ───────────────────────────────
+        self.update_idletasks()
+        ex = entry.winfo_rootx()
+        ey = entry.winfo_rooty() + entry.winfo_height() + 4
+        # Clamp so numpad doesn't go off the right/bottom of screen
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        pad_total = self._PAD * 5
+        w = self._BTN_W * 4 + pad_total + 16
+        h = self._BTN_H * 4 + pad_total + 16
+        x = min(ex, sw - w - 4)
+        y = min(ey, sh - h - 4)
+        self.geometry(f"+{x}+{y}")
+
+        # ── Build the grid ────────────────────────────────────────────────
+        outer = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=12)
+        outer.pack(padx=8, pady=8)
+
+        def _btn(parent, text, cmd, col, row, colspan=1, color=C_PRIMARY):
+            b = ctk.CTkButton(
+                parent, text=text, command=cmd,
+                width=self._BTN_W * colspan + self._PAD * (colspan - 1),
+                height=self._BTN_H,
+                font=("Arial Bold", 22),
+                fg_color=color, hover_color=C_SECONDARY,
+                text_color=C_TEXT, corner_radius=8,
+            )
+            b.grid(row=row, column=col, columnspan=colspan,
+                   padx=self._PAD // 2, pady=self._PAD // 2)
+            return b
+
+        p = self._PAD // 2
+        outer.grid_columnconfigure((0, 1, 2, 3), pad=p)
+        outer.grid_rowconfigure((0, 1, 2, 3), pad=p)
+
+        for digit, col, row in [
+            ("7", 0, 0), ("8", 1, 0), ("9", 2, 0),
+            ("4", 0, 1), ("5", 1, 1), ("6", 2, 1),
+            ("1", 0, 2), ("2", 1, 2), ("3", 2, 2),
+        ]:
+            _btn(outer, digit, lambda d=digit: self._press(d), col, row)
+
+        _btn(outer, "⌫",   self._backspace,        3, 0, color=C_DANGER)
+        _btn(outer, "C",   self._clear,             3, 1, color=C_DANGER)
+        _btn(outer, "±",   self._toggle_sign,       3, 2, color=C_PRIMARY)
+        _btn(outer, "0",   lambda: self._press("0"), 0, 3, colspan=2)
+        _btn(outer, ".",   lambda: self._press("."), 2, 3)
+        _btn(outer, "DONE", self._done,             3, 3, color=C_SUCCESS)
+
+        # Close on click outside
+        self.bind("<FocusOut>", self._on_focus_out)
+        self.after(100, lambda: self.focus_set())
+
+    def _press(self, char: str):
+        """Append char to entry, preventing duplicate decimal points."""
+        current = self._entry.get()
+        if char == "." and "." in current:
+            return
+        self._entry.insert("end", char)
+
+    def _backspace(self):
+        current = self._entry.get()
+        if current:
+            self._entry.delete(len(current) - 1, "end")
+
+    def _clear(self):
+        self._entry.delete(0, "end")
+
+    def _toggle_sign(self):
+        current = self._entry.get()
+        if current.startswith("-"):
+            self._entry.delete(0, 1)
+        else:
+            self._entry.insert(0, "-")
+
+    def _done(self):
+        self.destroy()
+
+    def _on_focus_out(self, *_):
+        # Give a short grace period so button clicks register first
+        self.after(150, self._check_focus)
+
+    def _check_focus(self):
+        try:
+            focused = self.focus_get()
+            if focused is None or str(focused) not in str(self.winfo_children()):
+                self.destroy()
+        except Exception:
+            self.destroy()
+
+
+def attach_numpad(root: tk.Tk, *entries: ctk.CTkEntry):
+    """
+    Bind a numpad overlay to one or more CTkEntry widgets.
+    Clicking/focusing an entry opens the numpad pointed at that entry.
+    Only one numpad is open at a time — opening a new one closes the old.
+    """
+    _state = {"pad": None}
+
+    def _open(entry):
+        existing = _state["pad"]
+        if existing is not None:
+            try:
+                existing.destroy()
+            except Exception:
+                pass
+        pad = NumpadOverlay(root, entry)
+        _state["pad"] = pad
+
+    for e in entries:
+        e.bind("<ButtonPress-1>", lambda *_, ent=e: _open(ent), add="+")
+
+
 def make_nav_button(parent, text: str, command,
-                    color: str = C_TEXT, #making the button a matching gray 
+                    color: str = C_TEXT, #making the button a matching gray
                     width: int = 600,
                     height: int = 100) -> ctk.CTkButton:
     """
@@ -612,33 +1080,36 @@ class BaseScreen(ctk.CTkFrame):
 
 class StartupScreen(BaseScreen):
     """
-    First screen shown on launch. No robot communication happens here.
-    Displays the Bullseye logo and a START button.
+    First screen shown on launch. Displays the Bullseye logo.
+
+    STARTUP = True  (debug): shows a START button that bypasses the Pi connection
+                             check and navigates immediately to MainMenuScreen.
+    STARTUP = False (prod):  replaces the START button with a "CONNECTING..."
+                             label; sends a ping packet every PING_INTERVAL_MS ms
+                             until a ping_ack arrives, then auto-navigates.
+                             The screen is locked — the user cannot proceed until
+                             the Pi responds.
 
     TODO - JAY - Maybe get the font to match the bullseye screen - later
     """
     def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
 
+        self._ping_id: str | None = None   # after() id for ping loop
+        self._poll_id: str | None = None   # after() id for event poll
+        self.bind("<Destroy>", self._on_destroy)
+
         # Center everything vertically and horizontally
         center = ctk.CTkFrame(self, fg_color="transparent")
         center.place(relx=0.5, rely=0.5, anchor="center")
 
-        # ── Logo placeholder ──────────────────────────────────────────────
-        # Replace this CTkLabel with a CTkImage widget once assets/logo.png exists
-
+        # ── Logo ──────────────────────────────────────────────────────────
         self.logo_image = ctk.CTkImage(
             Image.open("assets/logo.png"),
-            size=(800,500)
+            size=(800, 500)
         )
+        ctk.CTkLabel(center, image=self.logo_image, text="").pack()
 
-        ctk.CTkLabel(
-            center,
-            image = self.logo_image,
-            text = ""
-        ).pack()
-       
-       
         #ctk.CTkLabel(
         #   center, text="BULLSEYE",
         #   font=("Arial Black", 90, "bold"),
@@ -651,12 +1122,99 @@ class StartupScreen(BaseScreen):
         #    text_color=C_MUTED,
         #).pack(pady=(0, 70))
 
-        # ── START button ──────────────────────────────────────────────────
-        make_nav_button(
-            center, "START",
-            command=lambda: self.show(MainMenuScreen),
-            width=600, height=100,
-        ).pack(pady=(0,100))
+        # ── START button (debug) or CONNECTING label (prod) ──────────────
+        if STARTUP:
+            # Debug bypass — go straight to main menu without pinging
+            make_nav_button(
+                center, "START",
+                command=lambda: self.show(MainMenuScreen),
+                width=600, height=100,
+            ).pack(pady=(0, 100))
+        else:
+            # Production — show connecting state and start ping loop
+            self._status_label = ctk.CTkLabel(
+                center,
+                text="CONNECTING TO BULLSEYE...",
+                font=("Arial Black", 32),
+                text_color=C_MUTED,
+            )
+            self._status_label.pack(pady=(0, 100))
+            self._dot_count = 0
+            self._start_ping_loop()
+
+    def _start_ping_loop(self):
+        """Begin sending ping packets every PING_INTERVAL_MS ms."""
+        self._send_ping()
+        self._poll_events()
+
+    def _send_ping(self):
+        """Enqueue one ping packet then reschedule."""
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        enqueue_packet(self.state, "ping")
+        # Animate dots so the user knows it's alive
+        self._dot_count = (self._dot_count + 1) % 4
+        dots = "." * self._dot_count
+        try:
+            self._status_label.configure(
+                text=f"CONNECTING TO BULLSEYE{dots}"
+            )
+        except Exception:
+            pass
+        try:
+            self._ping_id = self.after(PING_INTERVAL_MS, self._send_ping)
+        except Exception:
+            pass
+
+    def _poll_events(self):
+        """Check event_queue every 200 ms for ping_ack from the Pi."""
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            unmatched = []
+            found = None
+            while not self.state.event_queue.empty():
+                try:
+                    event = self.state.event_queue.get_nowait()
+                except Exception:
+                    break
+                if event.get("type") == "ping_ack":
+                    found = event
+                    break
+                else:
+                    unmatched.append(event)
+            for e in unmatched:
+                self.state.event_queue.put(e)
+
+            if found is not None:
+                self._cancel_timers()
+                self.show(MainMenuScreen)
+                return
+        except Exception:
+            pass
+        try:
+            self._poll_id = self.after(200, self._poll_events)
+        except Exception:
+            pass
+
+    def _cancel_timers(self):
+        for attr in ("_ping_id", "_poll_id"):
+            id_ = getattr(self, attr, None)
+            if id_ is not None:
+                try:
+                    self.after_cancel(id_)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+    def _on_destroy(self, *_):
+        self._cancel_timers()
 
 
 # ============================================================
@@ -735,15 +1293,29 @@ class FreeDriveScreen(BaseScreen):
     Puts the robot in TELEOP state and streams joystick input until
     the user leaves the screen.
 
-    On enter   → sends StateData(TELEOP) + sets joystick_active=True
-    BACK       → sends StateData(DISABLED) + joystick_active=False → Main Menu
-    RETURN     → returns to Main Menu; robot stays in TELEOP and joystick
-                 keeps streaming (joystick_active remains True).
-                 This lets the user navigate the menu while the robot is live.
-                 Add enqueue_state(DISABLED) here if that behavior is unwanted.
+    On enter     → sends StateData(TELEOP) + sets joystick_active=True
+    BACK         → sends StateData(DISABLED) + joystick_active=False → Main Menu
+    SET HOME     → confirm dialog → pause joystick → request_pos → set_home
+                   → home_ack → save home.json → resume joystick
+                   On any ack timeout → show error label, re-enable button
+
+    SET HOME flow detail:
+      1. User presses SET HOME → confirm overlay appears
+      2. On confirm → joystick paused, button disabled, send request_pos
+      3. Poll for pos_data (ACK_TIMEOUT_MS)
+      4. On pos_data → send set_home with those coordinates
+      5. Poll for home_ack (ACK_TIMEOUT_MS)
+      6. On home_ack → save home.json, update app_state.home_pos,
+                        re-enable joystick + button, show brief success label
+      7. On any timeout → show error label, restore joystick + button
     """
-    def __init__(self, parent, app, app_state: AppState): #the state needs to match the state in the statedata.py file - 2 for teleop
+    def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
+
+        self._poll_id: str | None = None
+        self._set_home_stage: str = "idle"   # idle | confirm | req_pos | set_home
+        self._pending_pos: dict | None = None
+        self.bind("<Destroy>", self._on_destroy)
 
         # ── Center instruction text ───────────────────────────────────────
         center = ctk.CTkFrame(self, fg_color="transparent")
@@ -757,6 +1329,32 @@ class FreeDriveScreen(BaseScreen):
             justify="center",
         ).pack(pady=40)
 
+        # Status label — shown during set-home flow and on error/success
+        self._status_lbl = ctk.CTkLabel(
+            center, text="",
+            font=("Arial", 22),
+            text_color=C_MUTED,
+        )
+        self._status_lbl.pack(pady=(0, 10))
+
+        # ── Confirm overlay (hidden until SET HOME pressed) ───────────────
+        self._confirm_frame = ctk.CTkFrame(self, fg_color=C_SURFACE,
+                                            corner_radius=16, width=600, height=260)
+        ctk.CTkLabel(self._confirm_frame,
+                     text="Set current location as home position?",
+                     font=("Arial Bold", 26), text_color=C_TEXT).pack(pady=(30, 8))
+        ctk.CTkLabel(self._confirm_frame,
+                     text="Joystick will pause while home is being set.",
+                     font=("Arial", 18), text_color=C_MUTED).pack(pady=(0, 24))
+        confirm_btns = ctk.CTkFrame(self._confirm_frame, fg_color="transparent")
+        confirm_btns.pack(pady=(0, 30))
+        make_nav_button(confirm_btns, "CANCEL",
+                        command=self._cancel_set_home,
+                        color=C_DANGER, width=180, height=70).pack(side="left", padx=20)
+        make_nav_button(confirm_btns, "CONFIRM",
+                        command=self._confirmed_set_home,
+                        color=C_SUCCESS, width=180, height=70).pack(side="right", padx=20)
+
         # ── Bottom button bar ─────────────────────────────────────────────
         btn_bar = ctk.CTkFrame(self, fg_color="transparent")
         btn_bar.pack(side="bottom", pady=35)
@@ -765,9 +1363,10 @@ class FreeDriveScreen(BaseScreen):
                         command=self._back,
                         color=C_DANGER, width=220).pack(side="left", padx=40)
 
-        make_nav_button(btn_bar, "SET HOME",
-                        command=self._return_to_menu,
-                        color=C_SUCCESS, width=220).pack(side="right", padx=40)
+        self._set_home_btn = make_nav_button(btn_bar, "SET HOME",
+                                              command=self._press_set_home,
+                                              color=C_SUCCESS, width=220)
+        self._set_home_btn.pack(side="right", padx=40)
 
         # ── Activate TELEOP on screen construction ────────────────────────
         self._enter()
@@ -780,18 +1379,131 @@ class FreeDriveScreen(BaseScreen):
 
     def _back(self):
         """Disable robot, stop joystick stream, return to Main Menu."""
+        self._cancel_poll()
         enqueue_state(self.state, State.DISABLED)
         with self.state.lock:
             self.state.joystick_active = False
         self.show(MainMenuScreen)
 
-    def _return_to_menu(self):
-        """
-        Return to Main Menu while keeping the robot active.
-        joystick_active stays True so the TX thread keeps streaming.
-        The user can re-enter Free Drive or use BACK from Main Menu to stop.
-        """
-        self.show(MainMenuScreen)
+    # ── SET HOME flow ──────────────────────────────────────────────────────
+
+    def _press_set_home(self):
+        """Step 1: show confirm overlay."""
+        if self._set_home_stage != "idle":
+            return
+        self._set_home_stage = "confirm"
+        self._confirm_frame.place(relx=0.5, rely=0.5, anchor="center")
+        self._confirm_frame.lift()
+
+    def _cancel_set_home(self):
+        """User cancelled the confirm dialog — restore idle state."""
+        self._set_home_stage = "idle"
+        self._confirm_frame.place_forget()
+
+    def _confirmed_set_home(self):
+        """Step 2: hide confirm, pause joystick, send request_pos."""
+        self._confirm_frame.place_forget()
+        self._set_home_stage = "req_pos"
+        self._set_home_btn.configure(state="disabled", text="SETTING...")
+        self._status_lbl.configure(text="Fetching position...", text_color=C_MUTED)
+        with self.state.lock:
+            self.state.joystick_active = False
+        enqueue_packet(self.state, "request_pos")
+        self._timeout_remaining = ACK_TIMEOUT_MS // 200
+        self._poll_id = self.after(200, self._poll_set_home)
+
+    def _poll_set_home(self):
+        """Poll event_queue for pos_data then home_ack."""
+        self._poll_id = None
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+
+        try:
+            # Drain the full queue so a stale unrelated event can't block the
+            # target event.  Unmatched events are collected and put back.
+            unmatched = []
+            found = None
+            while not self.state.event_queue.empty():
+                try:
+                    event = self.state.event_queue.get_nowait()
+                except Exception:
+                    break
+                etype = event.get("type")
+                if self._set_home_stage == "req_pos" and etype == "pos_data":
+                    found = event
+                    break
+                elif self._set_home_stage == "set_home" and etype == "home_ack":
+                    found = event
+                    break
+                else:
+                    unmatched.append(event)
+            for e in unmatched:
+                self.state.event_queue.put(e)
+
+            if found is not None:
+                etype = found.get("type")
+                if etype == "pos_data":
+                    # Step 3: got position — now send set_home
+                    self._pending_pos = {"x": found["x"], "y": found["y"],
+                                         "yaw": found["yaw"]}
+                    self._set_home_stage = "set_home"
+                    self._status_lbl.configure(text="Updating home position...")
+                    payload = json.dumps(self._pending_pos)
+                    enqueue_packet(self.state, "set_home", payload)
+                    self._timeout_remaining = ACK_TIMEOUT_MS // 200
+                    self._poll_id = self.after(200, self._poll_set_home)
+                    return
+                elif etype == "home_ack":
+                    # Step 4: Pi confirmed — save locally and restore UI
+                    with self.state.lock:
+                        self.state.home_pos = dict(self._pending_pos)
+                    save_home(self._pending_pos)
+                    self._finish_set_home(success=True)
+                    return
+        except Exception:
+            pass
+
+        # Timeout countdown
+        self._timeout_remaining -= 1
+        if self._timeout_remaining <= 0:
+            self._finish_set_home(success=False)
+            return
+
+        try:
+            self._poll_id = self.after(200, self._poll_set_home)
+        except Exception:
+            pass
+
+    def _finish_set_home(self, success: bool):
+        """Restore UI after set-home flow succeeds or times out."""
+        self._set_home_stage = "idle"
+        self._pending_pos = None
+        with self.state.lock:
+            self.state.joystick_active = True
+        self._set_home_btn.configure(state="normal", text="SET HOME")
+        if success:
+            self._status_lbl.configure(text="Home position set!", text_color=C_SUCCESS)
+            self.after(3000, lambda: self._status_lbl.configure(text=""))
+        else:
+            self._status_lbl.configure(
+                text="No response from Bullseye — home not set. Try again.",
+                text_color=C_DANGER,
+            )
+            self.after(5000, lambda: self._status_lbl.configure(text=""))
+
+    def _cancel_poll(self):
+        if self._poll_id is not None:
+            try:
+                self.after_cancel(self._poll_id)
+            except Exception:
+                pass
+            self._poll_id = None
+
+    def _on_destroy(self, *_):
+        self._cancel_poll()
 
 
 # ============================================================
@@ -832,32 +1544,49 @@ class RecordRouteScreen(BaseScreen):
     """
     The user physically drives the robot while the Pi records a path.
 
-    On enter     → StateData(RECORD_PATH) + joystick_active=True
-    FINISH ROUTE → StateData(DISABLED); Pi cancels CreatePathCmd, saves CSV,
-                   sends DataPacket(type="path_created", json_data={"id": N});
-                   GUI waits for 'path_created' event then navigates to NameRouteScreen.
-    CANCEL ROUTE → StateData(DISABLED) → PathSubMenu
+    Entry flow (home-check gate):
+      1. Screen opens → sends 'record_home_check', shows CHECKING state,
+         disables buttons, does NOT start recording yet.
+      2a. ok=True  → transition to RECORDING state; send record_start,
+                     activate joystick.
+      2b. ok=False → show error panel (home position from home.json) with
+                     BACK TO MAIN MENU button; recording never starts.
+      2c. Timeout  → same error panel as 2b with a timeout message.
+
+    Recording flow (after gate passes):
+      FINISH ROUTE → StateData(DISABLED); Pi saves CSV, sends 'path_created';
+                     GUI waits then navigates to NameRouteScreen.
+      CANCEL ROUTE → StateData(DISABLED) → PathSubMenu
     """
     def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
 
-        self._waiting_for_confirm = False   # True after FINISH pressed
+        # ── Internal state ────────────────────────────────────────────────
+        # Stage: "checking" | "recording" | "saving" | "failed"
+        self._stage: str = "checking"
+        self._poll_id: str | None = None
         self._finish_timeout_id: str | None = None
-        self._poll_id: str | None = None      # after() id for _poll_events; cancelled on destroy
+        self._check_timeout_remaining: int = ACK_TIMEOUT_MS // 200
         self.bind("<Destroy>", self._on_destroy)
 
         # ── Center content ────────────────────────────────────────────────
-        center = ctk.CTkFrame(self, fg_color="transparent")
-        center.place(relx=0.5, rely=0.5, anchor="center")
+        self._center = ctk.CTkFrame(self, fg_color="transparent")
+        self._center.place(relx=0.5, rely=0.5, anchor="center")
 
         self._status_label = ctk.CTkLabel(
-            center,
-            text="● RECORDING\nDRIVE THE ROUTE YOU WANT TO SAVE",
+            self._center,
+            text="CHECKING HOME POSITION...",
             font=("Arial Black", 36),
-            text_color=C_DANGER,
+            text_color=C_MUTED,
             justify="center",
         )
         self._status_label.pack(pady=30)
+
+        # Error detail label — shown only when check fails
+        self._error_detail_lbl = ctk.CTkLabel(
+            self._center, text="",
+            font=("Arial", 22), text_color=C_MUTED, justify="center",
+        )
 
         # ── Bottom button bar ─────────────────────────────────────────────
         btn_bar = ctk.CTkFrame(self, fg_color="transparent")
@@ -869,6 +1598,7 @@ class RecordRouteScreen(BaseScreen):
             color=C_DANGER, width=240,
         )
         self._cancel_btn.pack(side="left", padx=40)
+        self._cancel_btn.configure(state="disabled")
 
         self._finish_btn = make_nav_button(
             btn_bar, "FINISH ROUTE",
@@ -876,29 +1606,127 @@ class RecordRouteScreen(BaseScreen):
             color=C_SECONDARY, width=240,
         )
         self._finish_btn.pack(side="right", padx=40)
+        self._finish_btn.configure(state="disabled")
 
-        # ── Start recording on screen construction ────────────────────────
-        self._enter()
-        self._poll_events()   # Begin polling for path_created confirmation
+        # Back-to-menu button shown only on check failure
+        self._back_btn = make_nav_button(
+            btn_bar, "BACK TO MAIN MENU",
+            command=self._back_to_menu,
+            color=C_PRIMARY, width=300,
+        )
+        # Not packed yet — only shown on failure
 
-    def _enter(self):
-        """
-        Called once on screen construction.
-        Sends TELEOP so the robot accepts joystick input, then sends
-        'record_start' so the Pi enables localization and begins collecting
-        path points. Opens the joystick stream so the user can drive.
-        """
+        # ── Kick off home check ───────────────────────────────────────────
+        enqueue_packet(self.state, "record_home_check")
+        self._poll_id = self.after(200, self._poll_check)
+
+    # ── Home check polling ─────────────────────────────────────────────────
+
+    def _poll_check(self):
+        """Poll for record_home_check_result during the checking stage."""
+        self._poll_id = None
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+
+        try:
+            unmatched = []
+            found = None
+            while not self.state.event_queue.empty():
+                try:
+                    event = self.state.event_queue.get_nowait()
+                except Exception:
+                    break
+                if event.get("type") == "record_home_check_result":
+                    found = event
+                    break
+                else:
+                    unmatched.append(event)
+            for e in unmatched:
+                self.state.event_queue.put(e)
+
+            if found is not None:
+                if found.get("ok"):
+                    self._start_recording()
+                else:
+                    self._show_check_failure(timed_out=False)
+                return
+        except Exception:
+            pass
+
+        self._check_timeout_remaining -= 1
+        if self._check_timeout_remaining <= 0:
+            self._show_check_failure(timed_out=True)
+            return
+
+        try:
+            self._poll_id = self.after(200, self._poll_check)
+        except Exception:
+            pass
+
+    def _start_recording(self):
+        """Home check passed — transition to RECORDING state."""
+        self._stage = "recording"
+        self._status_label.configure(
+            text="● RECORDING\nDRIVE THE ROUTE YOU WANT TO SAVE",
+            text_color=C_DANGER,
+        )
+        self._cancel_btn.configure(state="normal")
+        self._finish_btn.configure(state="normal")
         enqueue_state(self.state, State.RECORD_PATH)
         enqueue_packet(self.state, "record_start")
         with self.state.lock:
             self.state.joystick_active = True
 
+    def _show_check_failure(self, timed_out: bool):
+        """Home check failed or timed out — show error and back button."""
+        self._stage = "failed"
+        self._status_label.configure(
+            text="NOT AT HOME POSITION",
+            text_color=C_DANGER,
+        )
+
+        # Build a helpful detail message using the locally stored home position
+        with self.state.lock:
+            home = self.state.home_pos
+
+        if timed_out:
+            detail = "No response from Bullseye.\nCheck connection and try again."
+        elif home:
+            detail = (
+                f"Home is set to  X: {home['x']:.2f}  Y: {home['y']:.2f}  "
+                f"Yaw: {home['yaw']:.1f}°\n"
+                "Return to that position before recording."
+            )
+        else:
+            detail = (
+                "No home position is set.\n"
+                "Go to Settings → Bot Settings → Home Settings to set one."
+            )
+
+        self._error_detail_lbl.configure(text=detail)
+        self._error_detail_lbl.pack(pady=(0, 20))
+
+        # Swap finish/cancel for a single back-to-menu button
+        self._cancel_btn.pack_forget()
+        self._finish_btn.pack_forget()
+        self._back_btn.pack(pady=10)
+
+    def _back_to_menu(self):
+        """Navigate back to the main menu after a check failure."""
+        self._cancel_all_timers()
+        self.show(MainMenuScreen)
+
+    # ── Recording flow ─────────────────────────────────────────────────────
+
     def _finish(self):
         """Send finish command and wait for Pi to confirm the saved route ID."""
-        if self._waiting_for_confirm:
+        if self._stage != "recording":
             return
-        self._waiting_for_confirm = True
-        self._cancel_finish_timeout()
+        self._stage = "saving"
+        self._cancel_all_timers()
         enqueue_state(self.state, State.DISABLED)
         with self.state.lock:
             self.state.joystick_active = False
@@ -911,50 +1739,20 @@ class RecordRouteScreen(BaseScreen):
 
         enqueue_packet(self.state, "record_finish")
         self._status_label.configure(
-            text="⏳ SAVING ROUTE...\nWaiting for Pi confirmation",
+            text="SAVING ROUTE...\nWaiting for Pi confirmation",
             text_color=C_TERTIARY,
         )
-        # Disable both buttons while waiting so the user cannot double-send
         self._finish_btn.configure(state="disabled")
         self._cancel_btn.configure(state="disabled")
         self._finish_timeout_id = self.after(
             int(RECORD_FINISH_TIMEOUT * 1000),
             self._on_finish_timeout,
         )
-
-    def _on_destroy(self, *_):
-        """Cancel any pending after() callbacks when the frame is destroyed."""
-        if self._poll_id is not None:
-            try:
-                self.after_cancel(self._poll_id)
-            except Exception:
-                pass
-            self._poll_id = None
-        self._cancel_finish_timeout()
-
-    def _cancel_finish_timeout(self):
-        if self._finish_timeout_id is not None:
-            try:
-                self.after_cancel(self._finish_timeout_id)
-            except Exception:
-                pass
-            self._finish_timeout_id = None
-
-    def _on_finish_timeout(self):
-        self._finish_timeout_id = None
-        if not self._waiting_for_confirm:
-            return
-        self._waiting_for_confirm = False
-        self._status_label.configure(
-            text="SAVE TIMED OUT\nCheck connection and try again",
-            text_color=C_DANGER,
-        )
-        self._finish_btn.configure(state="normal")
-        self._cancel_btn.configure(state="normal")
+        self._poll_id = self.after(200, self._poll_events)
 
     def _cancel(self):
         """Discard the in-progress route and return to the path menu."""
-        self._cancel_finish_timeout()
+        self._cancel_all_timers()
         enqueue_packet(self.state, "record_cancel")
         enqueue_state(self.state, State.DISABLED)
         with self.state.lock:
@@ -962,39 +1760,69 @@ class RecordRouteScreen(BaseScreen):
         self.show(PathSubMenuScreen)
 
     def _poll_events(self):
-        """
-        Check the inbound event queue every 200 ms for a 'path_created'
-        confirmation from the Pi. When received, navigate to NameRouteScreen.
-        Stops when the frame is destroyed (after_id cancelled in _on_destroy).
-        """
+        """Poll for path_created confirmation during saving stage."""
         self._poll_id = None
-        # If this widget was already destroyed (e.g. e-stop fired), do nothing.
         try:
             if not self.winfo_exists():
                 return
         except Exception:
             return
         try:
+            unmatched = []
+            found = None
             while not self.state.event_queue.empty():
-                event = self.state.event_queue.get_nowait()
+                try:
+                    event = self.state.event_queue.get_nowait()
+                except Exception:
+                    break
                 if event.get("type") == "path_created":
-                    self._cancel_finish_timeout()
-                    with self.state.lock:
-                        self.state.joystick_active = False
-                    route_id = event.get("route_id")
-                    self.show(NameRouteScreen, route_id=route_id)
-                    return   # Frame will be destroyed; do not reschedule
-                elif event.get("type") == "connection_lost":
-                    # Put it back for the global app poller to display the warning.
-                    # Do NOT return here – keep rescheduling so we still catch
-                    # path_created if the Pi manages to send it before fully disconnecting.
-                    self.state.event_queue.put(event)
+                    found = event
+                    break
+                else:
+                    unmatched.append(event)
+            for e in unmatched:
+                self.state.event_queue.put(e)
+
+            if found is not None:
+                self._cancel_all_timers()
+                with self.state.lock:
+                    self.state.joystick_active = False
+                route_id = found.get("route_id")
+                self.show(NameRouteScreen, route_id=route_id)
+                return
         except Exception:
             pass
         try:
             self._poll_id = self.after(200, self._poll_events)
         except Exception:
-            pass   # Widget destroyed – stop polling
+            pass
+
+    def _on_finish_timeout(self):
+        self._finish_timeout_id = None
+        if self._stage != "saving":
+            return
+        self._stage = "recording"
+        self._status_label.configure(
+            text="SAVE TIMED OUT\nCheck connection and try again",
+            text_color=C_DANGER,
+        )
+        self._finish_btn.configure(state="normal")
+        self._cancel_btn.configure(state="normal")
+
+    # ── Cleanup ────────────────────────────────────────────────────────────
+
+    def _cancel_all_timers(self):
+        for attr in ("_poll_id", "_finish_timeout_id"):
+            id_ = getattr(self, attr, None)
+            if id_ is not None:
+                try:
+                    self.after_cancel(id_)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+    def _on_destroy(self, *_):
+        self._cancel_all_timers()
 
 
 # ============================================================
@@ -1081,9 +1909,24 @@ class NameRouteScreen(BaseScreen):
             self.after(1000, lambda: self._entry.configure(border_color=C_SECONDARY))
             return
 
+        # Capture current home position to associate with this route
         with self.state.lock:
-            self.state.routes[str(self._route_id)] = name
-            routes_snapshot = dict(self.state.routes)   # Copy under lock for safe JSON write
+            home_snapshot = dict(self.state.home_pos) if self.state.home_pos else None
+
+        with self.state.lock:
+            existing = self.state.routes.get(str(self._route_id), {})
+            # Preserve existing home if it was already set; only override if we
+            # are saving a brand-new route (home_snapshot is the current global home)
+            if isinstance(existing, dict) and existing.get("home") is not None:
+                home_to_save = existing["home"]
+            else:
+                home_to_save = home_snapshot
+
+            self.state.routes[str(self._route_id)] = {
+                "name": name,
+                "home": home_to_save,
+            }
+            routes_snapshot = dict(self.state.routes)
         save_routes(routes_snapshot)
         self.show(self._return_screen or PathSubMenuScreen)
 
@@ -1096,15 +1939,17 @@ class RunRouteScreen(BaseScreen):
     """
     Displays saved routes for selection, a speed slider, and run controls.
 
-    RUN          → StateData(AUTONOMOUS, path_id=selected, path_speed=slider/100)
-    STOP         → StateData(DISABLED) — replaces RUN button after route starts
-    RETURN HOME  → StateData(AUTONOMOUS, path_id=-1, path_speed=0.5)
-                   Convention: path_id = -1 signals the Pi to run the home route.
-                   TODO: Confirm path_id=-1 as 'home' convention with Pi team.
-    BACK         → StateData(DISABLED) if running, then → PathSubMenu
+    Flow:
+      1. Select route → press RUN
+      2. Home check gate: sends record_home_check, polls for result
+         ok=True  → show run-confirm overlay (route name + speed, START / CANCEL)
+         ok=False → show inline error with home coords, re-enable RUN
+         timeout  → same error
+      3. START confirmed → AUTONOMOUS state sent; RUN/HOME hidden, only STOP shown
+      4. STOP → DISABLED; restore RUN + HOME buttons
 
-    TODO: for testing need to get "fake" routes inside so that we can test 
-    the state logic change for the run route and the return home
+    RETURN HOME → confirm overlay → RETURN_TO_HOME state
+    BACK        → DISABLED if running → PathSubMenu
     """
     def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
@@ -1114,6 +1959,9 @@ class RunRouteScreen(BaseScreen):
         self._route_action_frames: dict = {}  # route_id (int) → CTkFrame (hidden sub-row)
         self._expanded_id: int | None = None  # which row is currently expanded
         self._is_running: bool = False
+        self._poll_id: str | None = None
+        self._check_timeout_remaining: int = 0
+        self.bind("<Destroy>", self._on_destroy)
 
         # ── Main two-column content ───────────────────────────────────────
         content = ctk.CTkFrame(self, fg_color="transparent")
@@ -1159,29 +2007,95 @@ class RunRouteScreen(BaseScreen):
         self._speed_slider.set(50)
         self._speed_slider.pack(pady=(4, 24))
 
-        # Action buttons
+        # Status label shown during home check
+        self._run_status_lbl = ctk.CTkLabel(
+            controls, text="", font=("Arial", 15),
+            text_color=C_MUTED, wraplength=220, justify="center",
+        )
+        self._run_status_lbl.pack(pady=(0, 4))
+
+        # Action buttons — RUN and HOME visible at rest; STOP shown while running
         self._run_btn = make_nav_button(
             controls, "RUN",
-            command=self._run,
+            command=self._press_run,
             width=230, height=72,
         )
         self._run_btn.pack(pady=8)
+
+        self._home_btn = make_nav_button(
+            controls, "HOME",
+            command=self._press_return_home,
+            color=C_SUCCESS, width=230, height=62,
+        )
+        self._home_btn.pack(pady=8)
 
         self._stop_btn = make_nav_button(
             controls, "STOP",
             command=self._stop,
             color=C_DANGER, width=230, height=72,
         )
-        self._stop_btn.pack(pady=8)
-        self._stop_btn.configure(state="disabled")
-
-        make_nav_button(controls, "HOME",
-                        command=self._return_home,
-                        color=C_SUCCESS, width=230, height=62).pack(pady=8)
+        # Not packed yet — shown only while running
 
         make_nav_button(controls, "← BACK",
                         command=self._back,
                         color=C_PRIMARY, width=230, height=62).pack(pady=(20, 0))
+
+        # ── Home-check result overlay (shown after check fails) ───────────
+        self._check_overlay = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16,
+                                            width=600, height=240)
+        self._check_overlay_lbl = ctk.CTkLabel(
+            self._check_overlay, text="",
+            font=("Arial Bold", 22), text_color=C_DANGER,
+            wraplength=540, justify="center",
+        )
+        self._check_overlay_lbl.pack(pady=(28, 8))
+        self._check_detail_lbl = ctk.CTkLabel(
+            self._check_overlay, text="",
+            font=("Arial", 16), text_color=C_MUTED,
+            wraplength=540, justify="center",
+        )
+        self._check_detail_lbl.pack(pady=(0, 8))
+        make_nav_button(self._check_overlay, "OK",
+                        command=self._dismiss_check_overlay,
+                        color=C_PRIMARY, width=160, height=55).pack(pady=(0, 24))
+
+        # ── Run-confirm overlay (shown after home check passes) ───────────
+        self._run_confirm_frame = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16,
+                                                width=560, height=240)
+        self._run_confirm_lbl = ctk.CTkLabel(
+            self._run_confirm_frame, text="",
+            font=("Arial Bold", 22), text_color=C_TEXT,
+            wraplength=520, justify="center",
+        )
+        self._run_confirm_lbl.pack(pady=(28, 4))
+        self._run_confirm_detail = ctk.CTkLabel(
+            self._run_confirm_frame, text="",
+            font=("Arial", 16), text_color=C_MUTED,
+        )
+        self._run_confirm_detail.pack(pady=(0, 12))
+        rcfm_btns = ctk.CTkFrame(self._run_confirm_frame, fg_color="transparent")
+        rcfm_btns.pack(pady=(0, 24))
+        make_nav_button(rcfm_btns, "CANCEL",
+                        command=self._cancel_run_confirm,
+                        color=C_DANGER, width=160, height=60).pack(side="left", padx=16)
+        make_nav_button(rcfm_btns, "START",
+                        command=self._confirmed_run,
+                        color=C_SUCCESS, width=160, height=60).pack(side="right", padx=16)
+
+        # ── HOME confirm overlay ──────────────────────────────────────────
+        self._confirm_frame = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16,
+                                            width=520, height=200)
+        ctk.CTkLabel(self._confirm_frame,
+                     text="Send Bullseye back to its home position?",
+                     font=("Arial Bold", 24), text_color=C_TEXT).pack(pady=(28, 8))
+        cfm_btns = ctk.CTkFrame(self._confirm_frame, fg_color="transparent")
+        cfm_btns.pack(pady=(8, 28))
+        make_nav_button(cfm_btns, "CANCEL",
+                        command=self._cancel_home_confirm,
+                        color=C_DANGER, width=160, height=60).pack(side="left", padx=16)
+        make_nav_button(cfm_btns, "CONFIRM",
+                        command=self._confirmed_return_home,
+                        color=C_SUCCESS, width=160, height=60).pack(side="right", padx=16)
 
     def _build_route_list(self):
         """Populate the scrollable route list from app_state.routes."""
@@ -1202,21 +2116,30 @@ class RunRouteScreen(BaseScreen):
                          justify="center").pack(pady=50)
             return
 
-        for route_id_str, name in routes.items():
+        for route_id_str, entry in routes.items():
             rid = int(route_id_str)
+            name = entry.get("name", "") if isinstance(entry, dict) else str(entry)
+            home = entry.get("home") if isinstance(entry, dict) else None
+
+            # Home position sub-text
+            if home:
+                home_text = (f"Home: X {home['x']:.2f}  Y {home['y']:.2f}"
+                             f"  Yaw {home['yaw']:.1f}°")
+            else:
+                home_text = "Home: not set"
 
             # Outer container — holds row button + collapsible action frame
             outer = ctk.CTkFrame(self._route_scroll, fg_color="transparent")
             outer.pack(fill="x", pady=2)
 
-            # Main row button
+            # Main row button — two-line display (name + home summary)
             btn = ctk.CTkButton(
                 outer,
-                text=f"  {name}   (ID {rid})",
-                font=("Arial Bold", 18),
+                text=f"  {name}   (ID {rid})\n  {home_text}",
+                font=("Arial Bold", 16),
                 fg_color=C_SURFACE, hover_color=C_SECONDARY,
                 text_color=C_TEXT, corner_radius=8,
-                height=62, anchor="w",
+                height=72, anchor="w",
                 command=lambda r=rid: self._tap_route(r),
             )
             btn.pack(fill="x")
@@ -1226,6 +2149,9 @@ class RunRouteScreen(BaseScreen):
             action = ctk.CTkFrame(outer, fg_color=C_SURFACE, corner_radius=8)
             # Not packed yet; _tap_route will pack/forget it
             self._route_action_frames[rid] = action
+
+        # Enable drag-to-scroll after all rows are built
+        enable_touch_scroll(self._route_scroll)
 
     def _tap_route(self, route_id: int):
         """
@@ -1272,7 +2198,8 @@ class RunRouteScreen(BaseScreen):
         frame.configure(fg_color=C_SURFACE)
 
         with self.state.lock:
-            name = self.state.routes.get(str(route_id), "")
+            entry = self.state.routes.get(str(route_id), {})
+            name = entry.get("name", "") if isinstance(entry, dict) else str(entry)
 
         ctk.CTkButton(
             frame, text="RENAME",
@@ -1364,47 +2291,162 @@ class RunRouteScreen(BaseScreen):
                   heading="RENAME ROUTE",
                   return_screen=RunRouteScreen)
 
+
+
     def _on_speed_change(self, value):
         """Update the speed label as the slider moves. Value is 10–100 (int steps)."""
         self._speed_label.configure(text=f"{int(value)}%")
 
-    def _run(self):
-        """
-        Send AUTONOMOUS command with selected route ID and speed.
-        If no route is selected the list panel flashes red for 800 ms as a
-        no-popup error indicator so the user knows to pick a route first.
-        """
+    # ── RUN flow ──────────────────────────────────────────────────────────
+
+    def _press_run(self):
+        """Step 1: validate selection, send home check, start polling."""
         if self._selected_id is None:
-            # Flash the list panel background red then restore it.
-            # Uses two chained after() calls: one to apply red, one to restore.
             self._list_frame.configure(fg_color=C_DANGER)
             self.after(800, lambda: self._list_frame.configure(fg_color=C_SURFACE))
             return
-        # Slider value is 10–100 (integer steps); convert to 0.0–1.0 for the Pi.
+        self._run_btn.configure(state="disabled")
+        self._home_btn.configure(state="disabled")
+        self._run_status_lbl.configure(text="Checking home position...",
+                                        text_color=C_MUTED)
+        enqueue_packet(self.state, "record_home_check")
+        self._check_timeout_remaining = ACK_TIMEOUT_MS // 200
+        self._poll_id = self.after(200, self._poll_home_check)
+
+    def _poll_home_check(self):
+        """Poll for record_home_check_result."""
+        self._poll_id = None
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+
+        try:
+            unmatched = []
+            found = None
+            while not self.state.event_queue.empty():
+                try:
+                    event = self.state.event_queue.get_nowait()
+                except Exception:
+                    break
+                if event.get("type") == "record_home_check_result":
+                    found = event
+                    break
+                else:
+                    unmatched.append(event)
+            for e in unmatched:
+                self.state.event_queue.put(e)
+
+            if found is not None:
+                self._run_status_lbl.configure(text="")
+                if found.get("ok"):
+                    self._show_run_confirm()
+                else:
+                    self._show_check_failed(timed_out=False)
+                return
+        except Exception:
+            pass
+
+        self._check_timeout_remaining -= 1
+        if self._check_timeout_remaining <= 0:
+            self._run_status_lbl.configure(text="")
+            self._show_check_failed(timed_out=True)
+            return
+
+        try:
+            self._poll_id = self.after(200, self._poll_home_check)
+        except Exception:
+            pass
+
+    def _show_check_failed(self, timed_out: bool):
+        """Home check failed — show overlay with reason, re-enable RUN."""
+        self._run_btn.configure(state="normal")
+        self._home_btn.configure(state="normal")
+        if timed_out:
+            self._check_overlay_lbl.configure(text="NO RESPONSE FROM BULLSEYE")
+            self._check_detail_lbl.configure(text="Check connection and try again.")
+        else:
+            with self.state.lock:
+                home = self.state.home_pos
+            if home:
+                detail = (f"Home is  X: {home['x']:.2f}  Y: {home['y']:.2f}"
+                          f"  Yaw: {home['yaw']:.1f}°\n"
+                          "Return to that position before running.")
+            else:
+                detail = "No home position set.\nGo to Settings → Bot Settings → Home Settings."
+            self._check_overlay_lbl.configure(text="NOT AT HOME POSITION")
+            self._check_detail_lbl.configure(text=detail)
+        self._check_overlay.place(relx=0.5, rely=0.5, anchor="center")
+        self._check_overlay.lift()
+
+    def _dismiss_check_overlay(self):
+        self._check_overlay.place_forget()
+
+    def _show_run_confirm(self):
+        """Home check passed — show run-confirm overlay with route name + speed."""
+        with self.state.lock:
+            entry = self.state.routes.get(str(self._selected_id), {})
+        name = entry.get("name", f"Route {self._selected_id}") if isinstance(entry, dict) else str(entry)
+        speed_pct = int(self._speed_slider.get())
+        self._run_confirm_lbl.configure(
+            text=f"Run  \"{name}\"?"
+        )
+        self._run_confirm_detail.configure(
+            text=f"Speed: {speed_pct}%    Route ID: {self._selected_id}"
+        )
+        self._run_confirm_frame.place(relx=0.5, rely=0.5, anchor="center")
+        self._run_confirm_frame.lift()
+
+    def _cancel_run_confirm(self):
+        self._run_confirm_frame.place_forget()
+        self._run_btn.configure(state="normal")
+        self._home_btn.configure(state="normal")
+
+    def _confirmed_run(self):
+        """User confirmed — send AUTONOMOUS and switch to running UI."""
+        self._run_confirm_frame.place_forget()
         speed = self._speed_slider.get() / 100.0
         enqueue_state(self.state, State.AUTONOMOUS,
                       path_id=self._selected_id, path_speed=speed)
         self._is_running = True
-        self._run_btn.configure(state="disabled")
-        self._stop_btn.configure(state="normal")
+        self._run_btn.pack_forget()
+        self._home_btn.pack_forget()
+        self._stop_btn.pack(pady=8)
 
     def _stop(self):
-        """Send DISABLED, re-enable the RUN button."""
+        """Send DISABLED, restore RUN + HOME buttons."""
         enqueue_state(self.state, State.DISABLED)
         self._is_running = False
+        self._stop_btn.pack_forget()
         self._run_btn.configure(state="normal")
-        self._stop_btn.configure(state="disabled")
+        self._run_btn.pack(pady=8)
+        self._home_btn.configure(state="normal")
+        self._home_btn.pack(pady=8)
 
-    def _return_home(self):
-        """
-        Trigger the robot's return-home routine.
-        path_id = -1 is the agreed convention for 'go home'.
-        TODO: Confirm this convention with the Pi team before final deployment.
-        """
-        enqueue_state(self.state, State.AUTONOMOUS, path_id=-1, path_speed=0.5)
+    def _on_destroy(self, *_):
+        if self._poll_id is not None:
+            try:
+                self.after_cancel(self._poll_id)
+            except Exception:
+                pass
+
+    def _press_return_home(self):
+        """Show confirm overlay before returning home."""
+        self._confirm_frame.place(relx=0.5, rely=0.5, anchor="center")
+        self._confirm_frame.lift()
+
+    def _cancel_home_confirm(self):
+        self._confirm_frame.place_forget()
+
+    def _confirmed_return_home(self):
+        """Confirmed — send RETURN_TO_HOME state and switch to running UI."""
+        self._confirm_frame.place_forget()
+        enqueue_state(self.state, State.RETURN_TO_HOME)
         self._is_running = True
-        self._run_btn.configure(state="disabled")
-        self._stop_btn.configure(state="normal")
+        self._run_btn.pack_forget()
+        self._home_btn.pack_forget()
+        self._stop_btn.pack(pady=8)
 
     def _back(self):
         """Stop the robot if running, then return to the path sub-menu."""
@@ -1451,83 +2493,242 @@ class SettingsSubMenuScreen(BaseScreen):
 
 class ControllerSettingsScreen(BaseScreen):
     """
-    Sliders to adjust deadzone and update rate in-memory.
-    Changes apply immediately to the running threads (global vars).
+    Controller and robot settings:
 
-    TODO: Persist these values between sessions. Options:
-          a) Write to a settings.json alongside routes.json
-          b) Patch Robot/Constants.py (requires restart)
-          c) Send a settings packet to the Pi if the Pi also needs them
+    Deadzone    – live global read by JoystickThread on every axis-read cycle
+    Request Battery        – sends 'request_battery'; Pi replies with a 'battery'
+                             packet; screen shows voltage, current, SOC, time remaining
+    KFX Speed              – slider 10-100 %; SEND sends 'kfx_speed' packet;
+                             Pi replies with 'kfx_speed_ack'; updates KFX_SPEED global
     """
     def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
 
-        card = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16)
-        card.place(relx=0.5, rely=0.5, anchor="center", width=640, height=500)
+        self._poll_id: str | None = None
+        self._poll_stage: str = "idle"   # idle | battery | kfx_speed
+        self._timeout_remaining: int = 0
+        self.bind("<Destroy>", self._on_destroy)
+
+        card = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16,
+                            width=720, height=600)
+        card.place(relx=0.5, rely=0.5, anchor="center")
+        card.pack_propagate(False)
 
         ctk.CTkLabel(card, text="CONTROLLER SETTINGS",
                      font=("Arial Bold", 28),
-                     text_color=C_TEXT).pack(pady=(36, 24))
+                     text_color=C_TEXT).pack(pady=(28, 16))
 
         # ── Deadzone slider ───────────────────────────────────────────────
         ctk.CTkLabel(card, text="Joystick Deadzone",
-                     font=("Arial", 18), text_color=C_MUTED).pack()
-
+                     font=("Arial", 16), text_color=C_MUTED).pack()
         self._dz_label = ctk.CTkLabel(card, text=f"{DEADZONE:.2f}",
-                                       font=("Arial Bold", 26),
-                                       text_color=C_TERTIARY)
+                                       font=("Arial Bold", 24), text_color=C_TERTIARY)
         self._dz_label.pack()
-
         dz_slider = ctk.CTkSlider(
             card, from_=0.0, to=0.5, number_of_steps=50,
-            width=440, button_color=C_TERTIARY,
-            progress_color=C_SECONDARY,
+            width=440, button_color=C_TERTIARY, progress_color=C_SECONDARY,
             command=self._dz_changed,
         )
-        dz_slider.set(DEADZONE)   # Initialize thumb to current value
-        dz_slider.pack(pady=(0, 32))
+        dz_slider.set(DEADZONE)
+        dz_slider.pack(pady=(0, 16))
 
-        # ── Update rate slider ────────────────────────────────────────────
-        ctk.CTkLabel(card, text="Update Rate (seconds per cycle)",
-                     font=("Arial", 18), text_color=C_MUTED).pack()
+        # ── Divider ───────────────────────────────────────────────────────
+        ctk.CTkFrame(card, fg_color=C_PRIMARY, height=2, width=560).pack(pady=(0, 16))
 
-        self._rate_label = ctk.CTkLabel(card, text=f"{UPDATE_HZ:.3f}s",
-                                         font=("Arial Bold", 26),
-                                         text_color=C_TERTIARY)
-        self._rate_label.pack()
+        # ── Two-column lower section ──────────────────────────────────────
+        lower = ctk.CTkFrame(card, fg_color="transparent")
+        lower.pack(fill="x", padx=32)
 
-        rate_slider = ctk.CTkSlider(
-            card, from_=0.02, to=0.2, number_of_steps=18,
-            width=440, button_color=C_TERTIARY,
-            progress_color=C_SECONDARY,
-            command=self._rate_changed,
+        # Left: Request Battery
+        left = ctk.CTkFrame(lower, fg_color="transparent")
+        left.pack(side="left", expand=True, fill="both", padx=(0, 16))
+
+        ctk.CTkLabel(left, text="ROBOT BATTERY",
+                     font=("Arial Bold", 17), text_color=C_TEXT).pack(pady=(0, 8))
+
+        self._batt_display = ctk.CTkLabel(
+            left, text="--",
+            font=("Arial Bold", 15), text_color=C_MUTED,
+            justify="left", wraplength=240,
         )
-        rate_slider.set(UPDATE_HZ)   # Initialize thumb to current value
-        rate_slider.pack(pady=(0, 36))
+        self._batt_display.pack(pady=(0, 10))
+
+        self._batt_btn = make_nav_button(
+            left, "REQUEST",
+            command=self._request_battery,
+            color=C_SECONDARY, width=180, height=55,
+        )
+        self._batt_btn.pack()
+
+        # Right: KFX Speed
+        right = ctk.CTkFrame(lower, fg_color="transparent")
+        right.pack(side="right", expand=True, fill="both", padx=(16, 0))
+
+        ctk.CTkLabel(right, text="KFX RUN SPEED",
+                     font=("Arial Bold", 17), text_color=C_TEXT).pack(pady=(0, 4))
+
+        self._kfx_speed_label = ctk.CTkLabel(
+            right, text=f"{int(KFX_SPEED * 100)}%",
+            font=("Arial Bold", 30), text_color=C_TERTIARY,
+        )
+        self._kfx_speed_label.pack()
+
+        self._kfx_speed_slider = ctk.CTkSlider(
+            right, from_=10, to=100, number_of_steps=9,
+            width=220, button_color=C_TERTIARY, progress_color=C_SECONDARY,
+            command=self._kfx_speed_changed,
+        )
+        self._kfx_speed_slider.set(int(KFX_SPEED * 100))
+        self._kfx_speed_slider.pack(pady=(0, 8))
+
+        self._kfx_send_btn = make_nav_button(
+            right, "SEND",
+            command=self._send_kfx_speed,
+            color=C_SECONDARY, width=180, height=55,
+        )
+        self._kfx_send_btn.pack()
+
+        # Shared status label
+        self._status_lbl = ctk.CTkLabel(
+            card, text="",
+            font=("Arial", 15), text_color=C_MUTED,
+        )
+        self._status_lbl.pack(pady=(14, 0))
 
         make_nav_button(card, "← BACK",
                         command=lambda: self.show(SettingsSubMenuScreen),
-                        color=C_PRIMARY, width=220, height=65).pack()
+                        color=C_PRIMARY, width=220, height=60).pack(pady=(8, 16))
+
+    # ── Deadzone / rate ───────────────────────────────────────────────────
 
     def _dz_changed(self, value):
-        """
-        Slider callback for deadzone adjustment.
-        Updates the module-level DEADZONE global so JoystickThread picks
-        up the new value on its next axis-read cycle without a restart.
-        """
         global DEADZONE
         DEADZONE = round(float(value), 2)
         self._dz_label.configure(text=f"{DEADZONE:.2f}")
 
-    def _rate_changed(self, value):
-        """
-        Slider callback for update rate adjustment.
-        Updates the module-level UPDATE_HZ global so both JoystickThread
-        and SerialTXThread pick up the new sleep duration on their next cycle.
-        """
-        global UPDATE_HZ
-        UPDATE_HZ = round(float(value), 3)
-        self._rate_label.configure(text=f"{UPDATE_HZ:.3f}s")
+    # ── Request Battery ───────────────────────────────────────────────────
+
+    def _request_battery(self):
+        if self._poll_stage != "idle":
+            return
+        self._poll_stage = "battery"
+        self._batt_btn.configure(state="disabled", text="WAITING...")
+        self._status_lbl.configure(text="Requesting battery data...", text_color=C_MUTED)
+        enqueue_packet(self.state, "request_battery")
+        self._timeout_remaining = ACK_TIMEOUT_MS // 200
+        self._start_poll()
+
+    # ── KFX Speed ─────────────────────────────────────────────────────────
+
+    def _kfx_speed_changed(self, value):
+        self._kfx_speed_label.configure(text=f"{int(value)}%")
+
+    def _send_kfx_speed(self):
+        if self._poll_stage != "idle":
+            return
+        global KFX_SPEED
+        KFX_SPEED = self._kfx_speed_slider.get() / 100.0
+        self._poll_stage = "kfx_speed"
+        self._kfx_send_btn.configure(state="disabled", text="SENDING...")
+        self._status_lbl.configure(text="Sending KFX speed...", text_color=C_MUTED)
+        enqueue_packet(self.state, "kfx_speed", json.dumps({"speed": KFX_SPEED}))
+        self._timeout_remaining = ACK_TIMEOUT_MS // 200
+        self._start_poll()
+
+    # ── Shared poll ───────────────────────────────────────────────────────
+
+    def _start_poll(self):
+        if self._poll_id is not None:
+            try:
+                self.after_cancel(self._poll_id)
+            except Exception:
+                pass
+        try:
+            self._poll_id = self.after(200, self._poll_events)
+        except Exception:
+            pass
+
+    def _poll_events(self):
+        self._poll_id = None
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+
+        try:
+            unmatched = []
+            found = None
+            while not self.state.event_queue.empty():
+                try:
+                    event = self.state.event_queue.get_nowait()
+                except Exception:
+                    break
+                etype = event.get("type")
+                if self._poll_stage == "battery" and etype == "battery_update":
+                    found = event
+                    break
+                elif self._poll_stage == "kfx_speed" and etype == "kfx_speed_ack":
+                    found = event
+                    break
+                else:
+                    unmatched.append(event)
+            for e in unmatched:
+                self.state.event_queue.put(e)
+
+            if found is not None:
+                if self._poll_stage == "battery":
+                    soc  = found["state_of_charge"]
+                    v    = found["voltage"]
+                    a    = found["current"]
+                    w    = found["power"]
+                    mins = found["time_remaining"]
+                    self._batt_display.configure(
+                        text=(f"SOC:  {soc:.1f}%\n"
+                              f"Voltage:  {v:.2f} V\n"
+                              f"Current:  {a:.2f} A\n"
+                              f"Power:    {w:.1f} W\n"
+                              f"Remaining:  {mins:.0f} min"),
+                        text_color=C_TEXT,
+                    )
+                    self._batt_btn.configure(state="normal", text="REQUEST")
+                    self._status_lbl.configure(text="Battery data updated.", text_color=C_SUCCESS)
+                elif self._poll_stage == "kfx_speed":
+                    self._kfx_send_btn.configure(state="normal", text="SEND")
+                    self._status_lbl.configure(
+                        text=f"KFX speed set to {int(KFX_SPEED * 100)}%.",
+                        text_color=C_SUCCESS,
+                    )
+                self._poll_stage = "idle"
+                self.after(4000, lambda: self._status_lbl.configure(text=""))
+                return
+        except Exception:
+            pass
+
+        self._timeout_remaining -= 1
+        if self._timeout_remaining <= 0:
+            if self._poll_stage == "battery":
+                self._batt_btn.configure(state="normal", text="REQUEST")
+            elif self._poll_stage == "kfx_speed":
+                self._kfx_send_btn.configure(state="normal", text="SEND")
+            self._status_lbl.configure(
+                text="No response from Bullseye. Try again.",
+                text_color=C_DANGER,
+            )
+            self._poll_stage = "idle"
+            return
+
+        try:
+            self._poll_id = self.after(200, self._poll_events)
+        except Exception:
+            pass
+
+    def _on_destroy(self, *_):
+        if self._poll_id is not None:
+            try:
+                self.after_cancel(self._poll_id)
+            except Exception:
+                pass
 
 
 # ============================================================
@@ -1566,27 +2767,196 @@ class BotSettingsScreen(BaseScreen):
 
 class BoundarySettingsScreen(BaseScreen):
     """
-    Placeholder screen for boundary configuration options.
+    Set the 4 corner coordinates of the arena boundary.
 
-    TODO: Define boundary parameters to expose once the Pi-side API is designed.
-          Candidates: field boundary coordinates, fence limits, no-go zones.
+    Pre-populated from boundary.json if it exists.
+    SAVE & SEND → validates inputs → sends 'set_boundary' → waits for
+    'boundary_ack' (ACK_TIMEOUT_MS) → saves boundary.json on success.
+    On timeout → shows inline error message.
     """
     def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
 
-        card = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16)
-        card.place(relx=0.5, rely=0.5, anchor="center", width=520, height=300)
+        self._poll_id: str | None = None
+        self._waiting: bool = False
+        self._timeout_remaining: int = 0
+        self.bind("<Destroy>", self._on_destroy)
 
-        ctk.CTkLabel(card, text="BOUNDARY SETTINGS",
-                     font=("Arial Bold", 28),
-                     text_color=C_TEXT).pack(pady=(40, 16))
+        # ── Title ─────────────────────────────────────────────────────────
+        ctk.CTkLabel(self, text="BOUNDARY SETTINGS",
+                     font=("Arial Bold", 30),
+                     text_color=C_TEXT).pack(pady=(28, 4))
+        ctk.CTkLabel(self,
+                     text="Enter the X and Y coordinates of each arena corner.",
+                     font=("Arial", 16), text_color=C_MUTED).pack(pady=(0, 16))
 
-        ctk.CTkLabel(card, text="Boundary settings coming soon.",
-                     font=("Arial", 18), text_color=C_MUTED).pack(pady=20)
+        # ── Corner entry grid ─────────────────────────────────────────────
+        grid = ctk.CTkFrame(self, fg_color="transparent")
+        grid.pack(pady=8)
 
-        make_nav_button(card, "← BACK",
+        with self.state.lock:
+            existing = self.state.boundary  # {"corners": [{x,y}×4]} or None
+
+        self._entries: list[tuple] = []   # list of (x_entry, y_entry) per corner
+
+        corner_labels = ["Corner 1\n(Top-Left)", "Corner 2\n(Top-Right)",
+                         "Corner 3\n(Bottom-Right)", "Corner 4\n(Bottom-Left)"]
+
+        for i, label in enumerate(corner_labels):
+            col = i % 2
+            row = (i // 2) * 3   # 3 rows per corner pair: label, x, y
+
+            ctk.CTkLabel(grid, text=label,
+                         font=("Arial Bold", 18), text_color=C_TEXT,
+                         justify="center").grid(row=row, column=col, padx=40, pady=(12, 4))
+
+            x_frame = ctk.CTkFrame(grid, fg_color="transparent")
+            x_frame.grid(row=row + 1, column=col, padx=40, pady=2)
+            ctk.CTkLabel(x_frame, text="X:", font=("Arial", 16),
+                         text_color=C_MUTED, width=24).pack(side="left")
+            x_entry = ctk.CTkEntry(x_frame, width=140, font=("Arial", 16),
+                                    fg_color=C_SURFACE, text_color=C_TEXT,
+                                    border_color=C_SECONDARY)
+            x_entry.pack(side="left")
+
+            y_frame = ctk.CTkFrame(grid, fg_color="transparent")
+            y_frame.grid(row=row + 2, column=col, padx=40, pady=(2, 8))
+            ctk.CTkLabel(y_frame, text="Y:", font=("Arial", 16),
+                         text_color=C_MUTED, width=24).pack(side="left")
+            y_entry = ctk.CTkEntry(y_frame, width=140, font=("Arial", 16),
+                                    fg_color=C_SURFACE, text_color=C_TEXT,
+                                    border_color=C_SECONDARY)
+            y_entry.pack(side="left")
+
+            # Pre-populate from existing boundary
+            if existing and i < len(existing.get("corners", [])):
+                c = existing["corners"][i]
+                x_entry.insert(0, str(c.get("x", "")))
+                y_entry.insert(0, str(c.get("y", "")))
+
+            self._entries.append((x_entry, y_entry))
+
+        # Attach numpad to all 8 entry fields
+        all_entries = [e for pair in self._entries for e in pair]
+        attach_numpad(self.app, *all_entries)
+
+        # ── Status label ──────────────────────────────────────────────────
+        self._status_lbl = ctk.CTkLabel(self, text="",
+                                         font=("Arial", 18), text_color=C_MUTED)
+        self._status_lbl.pack(pady=(8, 0))
+
+        # ── Bottom buttons ────────────────────────────────────────────────
+        btn_bar = ctk.CTkFrame(self, fg_color="transparent")
+        btn_bar.pack(side="bottom", pady=24)
+
+        make_nav_button(btn_bar, "← BACK",
                         command=lambda: self.show(BotSettingsScreen),
-                        color=C_PRIMARY, width=220, height=65).pack(pady=24)
+                        color=C_PRIMARY, width=210, height=65).pack(side="left", padx=20)
+
+        self._save_btn = make_nav_button(btn_bar, "SAVE & SEND",
+                                          command=self._save,
+                                          width=230, height=65)
+        self._save_btn.pack(side="right", padx=20)
+
+    def _save(self):
+        """Validate entries, send set_boundary, wait for boundary_ack."""
+        if self._waiting:
+            return
+
+        corners = []
+        for i, (x_ent, y_ent) in enumerate(self._entries):
+            try:
+                x = float(x_ent.get().strip())
+                y = float(y_ent.get().strip())
+                corners.append({"x": x, "y": y})
+            except ValueError:
+                self._status_lbl.configure(
+                    text=f"Corner {i + 1}: X and Y must be numbers.",
+                    text_color=C_DANGER,
+                )
+                x_ent.configure(border_color=C_DANGER)
+                y_ent.configure(border_color=C_DANGER)
+                self.after(1500, lambda xe=x_ent, ye=y_ent: (
+                    xe.configure(border_color=C_SECONDARY),
+                    ye.configure(border_color=C_SECONDARY),
+                ))
+                return
+
+        self._waiting = True
+        self._timeout_remaining = ACK_TIMEOUT_MS // 200
+        self._save_btn.configure(state="disabled", text="SENDING...")
+        self._status_lbl.configure(text="Sending boundary to Bullseye...",
+                                    text_color=C_MUTED)
+
+        payload = json.dumps({"corners": corners})
+        enqueue_packet(self.state, "set_boundary", payload)
+        self._poll_id = self.after(200, self._poll_ack)
+
+    def _poll_ack(self):
+        self._poll_id = None
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+
+        try:
+            unmatched = []
+            found = None
+            while not self.state.event_queue.empty():
+                try:
+                    event = self.state.event_queue.get_nowait()
+                except Exception:
+                    break
+                if event.get("type") == "boundary_ack":
+                    found = event
+                    break
+                else:
+                    unmatched.append(event)
+            for e in unmatched:
+                self.state.event_queue.put(e)
+
+            if found is not None:
+                # Persist and update shared state
+                boundary_data = {"corners": []}
+                for xe, ye in self._entries:
+                    boundary_data["corners"].append(
+                        {"x": float(xe.get()), "y": float(ye.get())}
+                    )
+                with self.state.lock:
+                    self.state.boundary = boundary_data
+                save_boundary(boundary_data)
+                self._waiting = False
+                self._save_btn.configure(state="normal", text="SAVE & SEND")
+                self._status_lbl.configure(
+                    text="Boundary saved!", text_color=C_SUCCESS
+                )
+                self.after(3000, lambda: self._status_lbl.configure(text=""))
+                return
+        except Exception:
+            pass
+
+        self._timeout_remaining -= 1
+        if self._timeout_remaining <= 0:
+            self._waiting = False
+            self._save_btn.configure(state="normal", text="SAVE & SEND")
+            self._status_lbl.configure(
+                text="No response from Bullseye — boundary not saved. Try again.",
+                text_color=C_DANGER,
+            )
+            return
+
+        try:
+            self._poll_id = self.after(200, self._poll_ack)
+        except Exception:
+            pass
+
+    def _on_destroy(self, *_):
+        if self._poll_id is not None:
+            try:
+                self.after_cancel(self._poll_id)
+            except Exception:
+                pass
 
 
 # ============================================================
@@ -1595,27 +2965,334 @@ class BoundarySettingsScreen(BaseScreen):
 
 class HomeSettingsScreen(BaseScreen):
     """
-    Placeholder screen for home position configuration options.
+    Visual map of the arena with Bullseye's current position and home controls.
 
-    TODO: Define home settings to expose once the Pi-side API is designed.
-          Candidates: home position coordinates, return speed, home trigger behavior.
+    Left panel — tkinter Canvas showing:
+      • Arena boundary rectangle (scaled from boundary.json corners)
+      • Green dot at current bot position with a line indicating yaw
+      • REFRESH button to re-request pos_data
+
+    Right panel — controls:
+      • Editable X, Y, Yaw fields (pre-filled from home.json)
+      • UPDATE HOME → confirm → set_home → home_ack → save home.json
+      • RETURN TO HOME → confirm → StateData(RETURN_TO_HOME)
+
+    On any ack timeout → inline error label shown under the action buttons.
     """
+
+    _CANVAS_W = 420
+    _CANVAS_H = 360
+
     def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
 
-        card = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16)
-        card.place(relx=0.5, rely=0.5, anchor="center", width=520, height=300)
+        self._poll_id: str | None = None
+        self._action_stage: str = "idle"   # idle | set_home | confirm_home | confirm_rth
+        self._timeout_remaining: int = 0
+        self._pending_home: dict | None = None   # set before entering set_home stage
+        self.bind("<Destroy>", self._on_destroy)
 
-        ctk.CTkLabel(card, text="HOME SETTINGS",
-                     font=("Arial Bold", 28),
-                     text_color=C_TEXT).pack(pady=(40, 16))
+        with self.state.lock:
+            self._boundary = self.state.boundary    # may be None
+            self._home     = dict(self.state.home_pos) if self.state.home_pos else None
 
-        ctk.CTkLabel(card, text="Home settings coming soon.",
-                     font=("Arial", 18), text_color=C_MUTED).pack(pady=20)
+        # ── Title ─────────────────────────────────────────────────────────
+        ctk.CTkLabel(self, text="HOME SETTINGS",
+                     font=("Arial Bold", 30), text_color=C_TEXT).pack(pady=(20, 10))
 
-        make_nav_button(card, "← BACK",
+        # ── Two-column body ───────────────────────────────────────────────
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=24, pady=8)
+
+        # ── Left: canvas map ──────────────────────────────────────────────
+        left = ctk.CTkFrame(body, fg_color=C_SURFACE, corner_radius=12)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 16))
+
+        ctk.CTkLabel(left, text="ARENA MAP",
+                     font=("Arial Bold", 16), text_color=C_MUTED).pack(pady=(12, 4))
+
+        self._canvas = tk.Canvas(
+            left,
+            width=self._CANVAS_W, height=self._CANVAS_H,
+            bg="#1a1a1a", highlightthickness=0,
+        )
+        self._canvas.pack(padx=12, pady=8)
+
+        # ── Right: controls ───────────────────────────────────────────────
+        right = ctk.CTkFrame(body, fg_color="transparent", width=320)
+        right.pack(side="right", fill="y")
+        right.pack_propagate(False)
+
+        ctk.CTkLabel(right, text="HOME POSITION",
+                     font=("Arial Bold", 20), text_color=C_TEXT).pack(pady=(8, 16))
+
+        # X / Y / Yaw entry fields
+        for label, attr in [("X", "_x_entry"), ("Y", "_y_entry"), ("Yaw (°)", "_yaw_entry")]:
+            row = ctk.CTkFrame(right, fg_color="transparent")
+            row.pack(fill="x", pady=4)
+            ctk.CTkLabel(row, text=label, font=("Arial Bold", 16),
+                         text_color=C_MUTED, width=70).pack(side="left", padx=(0, 8))
+            entry = ctk.CTkEntry(row, width=180, font=("Arial", 16),
+                                  fg_color=C_SURFACE, text_color=C_TEXT,
+                                  border_color=C_SECONDARY)
+            entry.pack(side="left")
+            setattr(self, attr, entry)
+
+        # Pre-fill from home.json
+        if self._home:
+            self._x_entry.insert(0, str(self._home.get("x", "")))
+            self._y_entry.insert(0, str(self._home.get("y", "")))
+            self._yaw_entry.insert(0, str(self._home.get("yaw", "")))
+
+        # Attach numpad to all three entry fields
+        attach_numpad(self.app, self._x_entry, self._y_entry, self._yaw_entry)
+
+        # Status label for update-home feedback
+        self._status_lbl = ctk.CTkLabel(right, text="",
+                                         font=("Arial", 15), text_color=C_MUTED,
+                                         wraplength=280, justify="center")
+        self._status_lbl.pack(pady=(12, 0))
+
+        # UPDATE HOME button — uses direct CTkButton (smaller font fits narrow panel)
+        self._update_btn = ctk.CTkButton(
+            right, text="UPDATE HOME",
+            command=self._press_update_home,
+            font=("Arial", 26, "bold"),
+            fg_color=C_SECONDARY, hover_color=C_TERTIARY,
+            text_color=C_BG, corner_radius=20,
+            width=260, height=62,
+        )
+        self._update_btn.pack(pady=(16, 8))
+
+        # RETURN TO HOME button
+        ctk.CTkButton(
+            right, text="RETURN TO HOME",
+            command=self._press_return_home,
+            font=("Arial", 26, "bold"),
+            fg_color=C_SUCCESS, hover_color=C_TERTIARY,
+            text_color=C_BG, corner_radius=20,
+            width=260, height=62,
+        ).pack(pady=8)
+
+        # ── Confirm overlay (hidden) ───────────────────────────────────────
+        self._confirm_frame = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16,
+                                            width=540, height=200)
+        self._confirm_lbl = ctk.CTkLabel(self._confirm_frame, text="",
+                                          font=("Arial Bold", 22), text_color=C_TEXT,
+                                          wraplength=500, justify="center")
+        self._confirm_lbl.pack(pady=(28, 8))
+        cfm_btns = ctk.CTkFrame(self._confirm_frame, fg_color="transparent")
+        cfm_btns.pack(pady=(8, 28))
+        make_nav_button(cfm_btns, "CANCEL",
+                        command=self._cancel_confirm,
+                        color=C_DANGER, width=160, height=60).pack(side="left", padx=16)
+        make_nav_button(cfm_btns, "CONFIRM",
+                        command=self._confirmed_action,
+                        color=C_SUCCESS, width=160, height=60).pack(side="right", padx=16)
+
+        # ── Bottom back button ────────────────────────────────────────────
+        make_nav_button(self, "← BACK",
                         command=lambda: self.show(BotSettingsScreen),
-                        color=C_PRIMARY, width=220, height=65).pack(pady=24)
+                        color=C_PRIMARY, width=210, height=60).pack(side="bottom", pady=16)
+
+        # ── Initial map draw ─────────────────────────────────────────────
+        self._draw_map()
+
+    # ── Canvas map ────────────────────────────────────────────────────────
+
+    def _draw_map(self):
+        """Draw the arena boundary and home position diamond."""
+        self._canvas.delete("all")
+        W, H = self._CANVAS_W, self._CANVAS_H
+        PAD = 32
+
+        if not self._boundary or not self._boundary.get("corners"):
+            self._canvas.create_text(
+                W // 2, H // 2,
+                text="No boundary set.\nSet boundary in Boundary Settings.",
+                fill=C_MUTED, font=("Arial", 14), justify="center",
+            )
+            return
+
+        corners = self._boundary["corners"]
+        xs = [c["x"] for c in corners]
+        ys = [c["y"] for c in corners]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+
+        span_x = max_x - min_x or 1.0
+        span_y = max_y - min_y or 1.0
+
+        def to_canvas(x, y):
+            cx = PAD + (x - min_x) / span_x * (W - 2 * PAD)
+            cy = PAD + (1 - (y - min_y) / span_y) * (H - 2 * PAD)
+            return cx, cy
+
+        # Draw boundary polygon
+        pts = []
+        for c in corners:
+            pts.extend(to_canvas(c["x"], c["y"]))
+        self._canvas.create_polygon(pts, outline=C_SECONDARY, fill="", width=2)
+
+        # Draw corner markers
+        for c in corners:
+            cx, cy = to_canvas(c["x"], c["y"])
+            self._canvas.create_oval(cx - 4, cy - 4, cx + 4, cy + 4,
+                                      fill=C_SECONDARY, outline="")
+
+        # Draw home position (green diamond + yaw arrow)
+        if self._home:
+            import math
+            hx, hy = to_canvas(self._home["x"], self._home["y"])
+            size = 10
+            self._canvas.create_polygon(
+                hx, hy - size, hx + size, hy, hx, hy + size, hx - size, hy,
+                fill=C_SUCCESS, outline="white", width=1, tags="home_marker",
+            )
+            yaw_rad = math.radians(self._home["yaw"])
+            arrow_len = 28
+            ax = hx + arrow_len * math.cos(yaw_rad)
+            ay = hy - arrow_len * math.sin(yaw_rad)  # canvas y is flipped
+            self._canvas.create_line(
+                hx, hy, ax, ay,
+                fill="white", width=2, arrow="last",
+            )
+
+    def _start_poll(self):
+        self._cancel_poll()
+        try:
+            self._poll_id = self.after(200, self._poll_events)
+        except Exception:
+            pass
+
+    def _poll_events(self):
+        self._poll_id = None
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+
+        try:
+            # Drain the full queue so a stale event can't block the target.
+            unmatched = []
+            found = None
+            while not self.state.event_queue.empty():
+                try:
+                    event = self.state.event_queue.get_nowait()
+                except Exception:
+                    break
+                etype = event.get("type")
+                if self._action_stage == "set_home" and etype == "home_ack":
+                    found = event
+                    break
+                else:
+                    unmatched.append(event)
+            for e in unmatched:
+                self.state.event_queue.put(e)
+
+            if found is not None:
+                with self.state.lock:
+                    self.state.home_pos = dict(self._pending_home)
+                save_home(self._pending_home)
+                self._home = dict(self._pending_home)
+                self._draw_map()
+                self._action_stage = "idle"
+                self._update_btn.configure(state="normal", text="UPDATE HOME")
+                self._status_lbl.configure(text="Home position updated!",
+                                            text_color=C_SUCCESS)
+                self.after(3000, lambda: self._status_lbl.configure(text=""))
+                return
+        except Exception:
+            pass
+
+        self._timeout_remaining -= 1
+        if self._timeout_remaining <= 0:
+            self._update_btn.configure(state="normal", text="UPDATE HOME")
+            self._status_lbl.configure(
+                text="No response from Bullseye — home not updated. Try again.",
+                text_color=C_DANGER,
+            )
+            self._action_stage = "idle"
+            return
+
+        try:
+            self._poll_id = self.after(200, self._poll_events)
+        except Exception:
+            pass
+
+    # ── Update home flow ──────────────────────────────────────────────────
+
+    def _press_update_home(self):
+        """Validate entries and show confirm overlay."""
+        # Only block if a home-update is already in flight; a pos refresh is fine
+        # to interrupt (the new flow will cancel the old poll via _start_poll).
+        if self._action_stage == "set_home":
+            return
+        try:
+            x = float(self._x_entry.get().strip())
+            y = float(self._y_entry.get().strip())
+            yaw = float(self._yaw_entry.get().strip())
+        except ValueError:
+            self._status_lbl.configure(
+                text="X, Y and Yaw must be numbers.", text_color=C_DANGER
+            )
+            return
+        self._pending_home = {"x": x, "y": y, "yaw": yaw}
+        self._action_stage = "confirm_home"
+        self._confirm_lbl.configure(
+            text=f"Set home to  X: {x:.2f}  Y: {y:.2f}  Yaw: {yaw:.1f}°?"
+        )
+        self._confirm_frame.place(relx=0.5, rely=0.5, anchor="center")
+        self._confirm_frame.lift()
+
+    # ── Return to home flow ───────────────────────────────────────────────
+
+    def _press_return_home(self):
+        """Show confirm overlay for return-to-home."""
+        if self._action_stage == "set_home":
+            return  # don't interrupt an active set_home flow
+        self._action_stage = "confirm_rth"
+        self._confirm_lbl.configure(text="Send Bullseye back to its home position?")
+        self._confirm_frame.place(relx=0.5, rely=0.5, anchor="center")
+        self._confirm_frame.lift()
+
+    # ── Confirm overlay actions ───────────────────────────────────────────
+
+    def _cancel_confirm(self):
+        self._confirm_frame.place_forget()
+        self._action_stage = "idle"
+
+    def _confirmed_action(self):
+        self._confirm_frame.place_forget()
+        stage = self._action_stage
+
+        if stage == "confirm_home":
+            self._action_stage = "set_home"
+            self._update_btn.configure(state="disabled", text="UPDATING...")
+            self._status_lbl.configure(text="Updating home position...",
+                                        text_color=C_MUTED)
+            payload = json.dumps(self._pending_home)
+            enqueue_packet(self.state, "set_home", payload)
+            self._timeout_remaining = ACK_TIMEOUT_MS // 200
+            self._start_poll()
+
+        elif stage == "confirm_rth":
+            self._action_stage = "idle"
+            enqueue_state(self.state, State.RETURN_TO_HOME)
+
+    # ── Cleanup ───────────────────────────────────────────────────────────
+
+    def _cancel_poll(self):
+        if self._poll_id is not None:
+            try:
+                self.after_cancel(self._poll_id)
+            except Exception:
+                pass
+            self._poll_id = None
+
+    def _on_destroy(self, *_):
+        self._cancel_poll()
 
 
 # ============================================================
@@ -1777,7 +3454,8 @@ class KFXSettingsScreen(BaseScreen):
         rid = self._config.get(num_str)
         if rid is None:
             return num_str
-        name = self._routes.get(str(rid), f"ID{rid}")
+        entry = self._routes.get(str(rid), {})
+        name = entry.get("name", f"ID{rid}") if isinstance(entry, dict) else str(entry)
         return f"{num_str}\n{name[:7]}"
 
     def _build_route_table(self, parent):
@@ -1869,8 +3547,9 @@ class KFXSettingsScreen(BaseScreen):
             return
 
         # ── Route rows ────────────────────────────────────────────────────
-        for route_id_str, name in self._routes.items():
+        for route_id_str, entry in self._routes.items():
             rid = int(route_id_str)
+            name = entry.get("name", "") if isinstance(entry, dict) else str(entry)
             row = ctk.CTkFrame(scroll, fg_color=C_SURFACE, corner_radius=6)
             row.pack(fill="x", pady=3)
 
@@ -1888,6 +3567,9 @@ class KFXSettingsScreen(BaseScreen):
                 normal_color=C_SURFACE,
                 hover_color=C_ROW_HOVER,
             )
+
+        # Enable drag-to-scroll after all route rows are built
+        enable_touch_scroll(scroll)
 
     def _select_kfx_button(self, btn_num: str):
         """Gold-highlight the tapped KFX button; deselect previous."""
@@ -1969,19 +3651,28 @@ class KFXSettingsScreen(BaseScreen):
         """
         # ── Check for ack in queue ────────────────────────────────────────
         try:
+            unmatched = []
+            found = None
             while not self.state.event_queue.empty():
-                event = self.state.event_queue.get_nowait()
-                if event.get("type") == "kfx_ack":
-                    # Pi confirmed save – now safe to write local config
-                    with self.state.lock:
-                        self.state.kfx_config = dict(self._config)
-                    save_kfx_config(self._config)
-                    self.show(SettingsSubMenuScreen)
-                    return   # Frame destroyed – stop polling
-                else:
-                    # Not our event – put it back for other pollers
-                    self.state.event_queue.put(event)
+                try:
+                    event = self.state.event_queue.get_nowait()
+                except Exception:
                     break
+                if event.get("type") == "kfx_ack":
+                    found = event
+                    break
+                else:
+                    unmatched.append(event)
+            for e in unmatched:
+                self.state.event_queue.put(e)
+
+            if found is not None:
+                # Pi confirmed save – now safe to write local config
+                with self.state.lock:
+                    self.state.kfx_config = dict(self._config)
+                save_kfx_config(self._config)
+                self.show(SettingsSubMenuScreen)
+                return   # Frame destroyed – stop polling
         except Exception:
             pass
 
@@ -2355,61 +4046,81 @@ class BullseyeApp(ctk.CTk):
         # Left  side: robot battery (received from Pi over XBee).
         # Right side: Steam Deck battery (read from Linux sysfs).
         self._top_bar = ctk.CTkFrame(self, fg_color=C_SURFACE,
-                                      height=44, corner_radius=0)
+                                      height=50, corner_radius=0)
         self._top_bar.pack(fill="x", side="top")
         self._top_bar.pack_propagate(False)   # Keep fixed height
 
-        # Robot battery label – bottom-left
-        #self._robot_batt_lbl = ctk.CTkLabel(
-        #    self._top_bar,
-        #    text="🐂 --%",
-        #    font=("Arial Bold", 18),
-        #    text_color=C_TEXT,
-        #)
-        #self._robot_batt_lbl.pack(side="left", padx=16)
+        # ── Load and crop the combined bull+controller icon image ─────────
+        # The source image is a side-by-side pair: bull (left half) and
+        # controller (right half) on a steel background.
+        # We crop each half, then use ImageOps to tighten to the brightest
+        # region by thresholding only the very bright neon core (≥195/255)
+        # so the glow halo doesn't inflate the bounding box.
+        def _tight_crop(half: Image.Image) -> Image.Image:
+            gray = half.convert("L")
+            # Mask: only pixels brighter than 195 count as "content"
+            mask = gray.point(lambda p: 255 if p >= 195 else 0)
+            bbox = mask.getbbox()
+            if bbox:
+                pad = 18  # extra padding to keep some neon halo
+                x0 = max(0,           bbox[0] - pad)
+                y0 = max(0,           bbox[1] - pad)
+                x1 = min(half.width,  bbox[2] + pad)
+                y1 = min(half.height, bbox[3] + pad)
+                # Make it square so CTkImage doesn't distort
+                w, h = x1 - x0, y1 - y0
+                if w > h:
+                    diff = w - h
+                    y0 = max(0, y0 - diff // 2)
+                    y1 = min(half.height, y1 + diff // 2)
+                elif h > w:
+                    diff = h - w
+                    x0 = max(0, x0 - diff // 2)
+                    x1 = min(half.width, x1 + diff // 2)
+                return half.crop((x0, y0, x1, y1))
+            return half
 
-        # Steam Deck battery label – top-right
-        #self._deck_batt_lbl = ctk.CTkLabel(
-        #    self._top_bar,
-        #    text="🎮 --%",
-        #    font=("Arial Bold", 18),
-        #    text_color=C_TEXT,
-        #)
-        #self._deck_batt_lbl.pack(side="right", padx=16)
+        _icon_src = Image.open("assets/Bull and controller on steel background.png")
+        _iw, _ih  = _icon_src.size
+        _bull_ctk = ctk.CTkImage(_tight_crop(_icon_src.crop((0, 0, _iw // 2, _ih))), size=(44, 44))
+        _ctrl_ctk = ctk.CTkImage(_tight_crop(_icon_src.crop((_iw // 2, 0, _iw, _ih))), size=(44, 44))
 
-        # ── Robot battery visual ──────────────────────────────────────────────── = shit i added to get the icons to show up
+        # ── Robot battery (left side) ─────────────────────────────────────
         robot_frame = ctk.CTkFrame(self._top_bar, fg_color="transparent")
         robot_frame.pack(side="left", padx=16)
 
+        ctk.CTkLabel(robot_frame, image=_bull_ctk, text="").pack(side="left", padx=(0, 6))
+
         self._robot_batt_lbl = ctk.CTkLabel(
-            robot_frame, text="🐂 --%", font=("Segoe UI Emoji", 18),
-            text_color=C_TEXT
+            robot_frame, text="--%",
+            font=("Arial Bold", 18), text_color=C_TEXT,
         )
         self._robot_batt_lbl.pack(side="left", padx=(0, 8))
 
         self._robot_batt_canvas = tk.Canvas(
-         robot_frame, width=40, height=18,
-         bg=C_BG, highlightthickness=1, highlightbackground=C_TEXT
+            robot_frame, width=40, height=18,
+            bg=C_SURFACE, highlightthickness=0,
         )
-        
-        
         self._robot_batt_canvas.pack(side="left")
 
-# ── Steam Deck battery visual ───────────────────────────────────────────
+        # ── Steam Deck battery (right side) ───────────────────────────────
         deck_frame = ctk.CTkFrame(self._top_bar, fg_color="transparent")
         deck_frame.pack(side="right", padx=16)
 
-        self._deck_batt_lbl = ctk.CTkLabel(
-            deck_frame, text="🎮 --%", font=("Arial Bold", 18),
-           text_color=C_TEXT
-        )
-        self._deck_batt_lbl.pack(side="right", padx=(8, 0))
-
+        # Pack right-to-left: canvas → percentage → icon
         self._deck_batt_canvas = tk.Canvas(
             deck_frame, width=40, height=18,
-            bg=C_BG, highlightthickness=1, highlightbackground=C_TEXT
+            bg=C_SURFACE, highlightthickness=0,
         )
         self._deck_batt_canvas.pack(side="right")
+
+        self._deck_batt_lbl = ctk.CTkLabel(
+            deck_frame, text="--%",
+            font=("Arial Bold", 18), text_color=C_TEXT,
+        )
+        self._deck_batt_lbl.pack(side="right", padx=(0, 8))
+
+        ctk.CTkLabel(deck_frame, image=_ctrl_ctk, text="").pack(side="right", padx=(0, 6))
 
 
         # Start refreshing both battery labels every 5 seconds.
@@ -2482,15 +4193,17 @@ class BullseyeApp(ctk.CTk):
             #self._deck_batt_lbl.configure(text=deck_text)
 
             with self.app_state.lock:
-             robot_soc = self.app_state.battery.state_of_charge
-            self._robot_batt_lbl.configure(text=f" 🐂 {robot_soc:.0f}%")
+                robot_soc = self.app_state.battery.state_of_charge
+            self._robot_batt_lbl.configure(text=f"{robot_soc:.0f}%")
             self._draw_battery(self._robot_batt_canvas, robot_soc)
 
             deck_soc = get_steamdeck_battery()
             if deck_soc is None:
-                deck_soc = 0
-            self._deck_batt_lbl.configure(text=f"🎮 {deck_soc}%")
-            self._draw_battery(self._deck_batt_canvas, deck_soc)
+                self._deck_batt_lbl.configure(text="--%")
+                self._draw_battery(self._deck_batt_canvas, 0)
+            else:
+                self._deck_batt_lbl.configure(text=f"{deck_soc}%")
+                self._draw_battery(self._deck_batt_canvas, deck_soc)
 
 
 
@@ -2544,16 +4257,22 @@ class BullseyeApp(ctk.CTk):
         All other events are put back for the active screen to consume.
         """
         try:
-            while not self.app_state.event_queue.empty():
-                event = self.app_state.event_queue.get_nowait()
+            # Snapshot the queue depth so we don't loop on events we just
+            # re-queued (which would cause an infinite loop this tick).
+            depth = self.app_state.event_queue.qsize()
+            for _ in range(depth):
+                try:
+                    event = self.app_state.event_queue.get_nowait()
+                except Exception:
+                    break
                 if event.get("type") == "path_created":
-                    # Only re-queue if RecordRouteScreen is still waiting for it
+                    # Only keep if RecordRouteScreen is still waiting for it
                     if isinstance(self._current_frame, RecordRouteScreen):
                         self.app_state.event_queue.put(event)
-                    # else: stale event — silently discard
+                    # else: stale — discard
                 else:
+                    # All other events belong to screen-level pollers; put back
                     self.app_state.event_queue.put(event)
-                break   # Avoid infinite re-queue loop in a single poll cycle
         except Exception:
             pass
         self.after(500, self._poll_global_events)
@@ -2609,6 +4328,13 @@ def main():
     joystick_thread.start()
     tx_thread.start()
     rx_thread.start()
+
+    # ── Fake Pi responder (debug only) ────────────────────────────────────
+    if FAKE_PI:
+        fake_pi = FakePiResponder(app_state)
+        fake_pi._install_tap()
+        fake_pi.start()
+        print("[FAKE PI] Active – all Pi acks will be auto-injected")
 
     # ── GUI (blocks until window is closed) ───────────────────────────────
     app = BullseyeApp(app_state, joystick_thread, tx_thread, rx_thread)
