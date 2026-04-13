@@ -19,7 +19,7 @@
 # ============================================================
 # TOGGLE FLAGS
 # ============================================================
-DEBUG_OVERLAY      = True    # Show semi-transparent TX log overlay on screen
+DEBUG_OVERLAY      = False    # Show semi-transparent TX log overlay on screen
 REQUIRE_CONNECTION = False   # True = halt on missing XBee; False = UI-only mode
 STARTUP            = True    # True = show START button (debug bypass); False = lock on startup until ping_ack
 KFX_SPEED          = 0.5     # Global KFX run speed (0.0–1.0); sent to Pi via kfx_speed packet
@@ -2477,6 +2477,26 @@ class ControllerSettingsScreen(BaseScreen):
         )
         self._status_lbl.pack(pady=(14, 0))
 
+        # ── Debug Overlay toggle ──────────────────────────────────────────
+        ctk.CTkFrame(card, fg_color=C_PRIMARY, height=2, width=560).pack(pady=(14, 8))
+
+        debug_row = ctk.CTkFrame(card, fg_color="transparent")
+        debug_row.pack()
+
+        ctk.CTkLabel(debug_row, text="Debug TX Overlay",
+                     font=("Arial", 16), text_color=C_MUTED).pack(side="left", padx=(0, 16))
+
+        self._debug_switch = ctk.CTkSwitch(
+            debug_row, text="",
+            command=self._toggle_debug_overlay,
+            button_color=C_TERTIARY, progress_color=C_SECONDARY,
+        )
+        if DEBUG_OVERLAY:
+            self._debug_switch.select()
+        else:
+            self._debug_switch.deselect()
+        self._debug_switch.pack(side="left")
+
         make_nav_button(card, "← BACK",
                         command=lambda: self.show(SettingsSubMenuScreen),
                         color=C_PRIMARY, width=220, height=60).pack(pady=(8, 16))
@@ -2487,6 +2507,11 @@ class ControllerSettingsScreen(BaseScreen):
         global DEADZONE
         DEADZONE = round(float(value), 2)
         self._dz_label.configure(text=f"{DEADZONE:.2f}")
+
+    # ── Debug overlay toggle ──────────────────────────────────────────────
+
+    def _toggle_debug_overlay(self):
+        self.app.toggle_debug_overlay(self._debug_switch.get() == 1)
 
     # ── Request Battery ───────────────────────────────────────────────────
 
@@ -4122,6 +4147,17 @@ class BullseyeApp(ctk.CTk):
         if self._overlay:
             self._overlay.lift()
         self._estop.lift()
+
+    def toggle_debug_overlay(self, enabled: bool):
+        """Show or hide the debug TX-log overlay."""
+        global DEBUG_OVERLAY
+        DEBUG_OVERLAY = enabled
+        if enabled and self._overlay is None:
+            self._overlay = DebugOverlay(self, self.app_state)
+            self._overlay.lift()
+        elif not enabled and self._overlay is not None:
+            self._overlay.frame.place_forget()
+            self._overlay = None
 
     def _poll_global_events(self):
         """
