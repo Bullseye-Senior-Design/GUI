@@ -8,6 +8,9 @@ Remove as we finish thingys
 10. OPTIONAL... Sensor fault
 - Save for later
 - if there is a sensor fault display on the user screen fault in X sensor cannot run routes only free drive or something
+11. change the error message to "no response from bullseye -- hpme "position in error state - set home position again before running" 
+12. only display paths that the home position is currently set...?
+13. return to home button tp be removed from the home settings page 
 
 
 -----------------
