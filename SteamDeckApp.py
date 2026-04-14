@@ -3477,6 +3477,7 @@ class KFXSettingsScreen(BaseScreen):
             # Local working copy – only committed to shared state on SAVE
             self._config: dict = dict(self.state.kfx_config)
             self._routes: dict = dict(self.state.routes)
+            self._home_pos: dict | None = dict(self.state.home_pos) if self.state.home_pos else None
 
         self._selected_btn: str | None = None    # e.g. "3", "5"
         self._phone_buttons: dict = {}           # btn_num_str → CTkButton widget
@@ -3634,7 +3635,12 @@ class KFXSettingsScreen(BaseScreen):
         ctk.CTkLabel(parent,
                      text="① Select a remote button (1–6)\n② Tap a route to assign it",
                      font=("Arial", 13), text_color=C_MUTED,
-                     justify="center").pack(pady=(0, 10))
+                     justify="center").pack(pady=(0, 2))
+
+        ctk.CTkLabel(parent,
+                     text="Only routes matching your current home are shown.",
+                     font=("Arial", 11), text_color=C_MUTED,
+                     justify="center").pack(pady=(0, 8))
 
         # Column header row
         hdr = ctk.CTkFrame(parent, fg_color=C_BG, corner_radius=0)
@@ -3700,8 +3706,29 @@ class KFXSettingsScreen(BaseScreen):
                          font=("Arial", 15), text_color=C_MUTED).pack(pady=30)
             return
 
+        # Filter routes to only those whose home matches the current home position
+        matching_routes = {
+            rid_str: entry
+            for rid_str, entry in self._routes.items()
+            if homes_match(
+                entry.get("home") if isinstance(entry, dict) else None,
+                self._home_pos,
+            )
+        }
+
+        if not matching_routes:
+            msg = (
+                "No routes match your current home position."
+                if self._home_pos is not None
+                else "No home position set.\nSet a home position to assign routes."
+            )
+            ctk.CTkLabel(scroll, text=msg,
+                         font=("Arial", 15), text_color=C_MUTED,
+                         justify="center").pack(pady=30)
+            return
+
         # ── Route rows ────────────────────────────────────────────────────
-        for route_id_str, entry in self._routes.items():
+        for route_id_str, entry in matching_routes.items():
             rid = int(route_id_str)
             name = entry.get("name", "") if isinstance(entry, dict) else str(entry)
             row = ctk.CTkFrame(scroll, fg_color=C_SURFACE, corner_radius=6)
