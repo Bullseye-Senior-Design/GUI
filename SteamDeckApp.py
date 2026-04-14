@@ -2972,14 +2972,14 @@ class HomeSettingsScreen(BaseScreen):
         self._update_btn.pack(pady=(16, 8))
 
         # RETURN TO HOME button
-        ctk.CTkButton(
-            right, text="RETURN TO HOME",
-            command=self._press_return_home,
-            font=("Arial", 26, "bold"),
-            fg_color=C_SUCCESS, hover_color=C_TERTIARY,
-            text_color=C_BG, corner_radius=20,
-            width=260, height=62,
-        ).pack(pady=8)
+        #ctk.CTkButton(
+        #    right, text="RETURN TO HOME",
+        #    command=self._press_return_home,
+        #    font=("Arial", 26, "bold"),
+        #    fg_color=C_SUCCESS, hover_color=C_TERTIARY,
+        #    text_color=C_BG, corner_radius=20,
+        #    width=260, height=62,
+        #).pack(pady=8)
 
         # ── Confirm overlay (hidden) ───────────────────────────────────────
         self._confirm_frame = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16,
