@@ -1,5 +1,10 @@
 Remove as we finish thingys
 ---------------------------
+1. Robot comms safety
+- If we haven't received a packet from contoller in X sec send ping, if you don't receive ping in x sec shut tf down
+2. Error packet popups across top of the screen with an X button
+3. Check the rectangle size for home setting screen
+
 9. Data Packet Dropout
 - Currently operatable but not good practice
 - Idek cry and hope it feels bad....
