@@ -1,138 +1,26 @@
 {
+<<<<<<< Updated upstream
+  "1": "Barrel Run",
+  "3": "East Pasture",
+  "25": "YTH",
+  "35": "GT",
+  "38": "TEST"
+=======
   "1": {
-    "name": "Barrel Run",
+    "name": "THIS C9OOL",
     "home": {
-      "x": 1.0,
-      "y": 2.0,
-      "yaw": 3.0
-    }
-  },
-  "3": {
-    "name": "East Pasture",
-    "home": {
-      "x": 1.0,
-      "y": 2.0,
-      "yaw": 3.0
-    }
-  },
-  "25": {
-    "name": "YTH",
-    "home": {
-      "x": 0.0,
-      "y": 0.0,
-      "yaw": 0.0
-    }
-  },
-  "35": {
-    "name": "GT",
-    "home": {
-      "x": 1.0,
-      "y": 2.0,
-      "yaw": 3.0
-    }
-  },
-  "42": {
-    "name": "Arena Loop",
-    "home": {
-      "x": 4.0,
-      "y": 5.0,
-      "yaw": 6.0
-    }
-  },
-  "57": {
-    "name": "North Track",
-    "home": {
-      "x": 4.0,
-      "y": 5.0,
-      "yaw": 6.0
-    }
-  },
-  "74": {
-    "name": "Figure Eight",
-    "home": {
-      "x": 4.0,
-      "y": 5.0,
-      "yaw": 6.0
-    }
-  },
-  "383": {
-    "name": "1234568",
-    "home": {
-      "x": 1.0,
-      "y": 2.0,
-      "yaw": 3.0
-    }
-  },
-  "58": {
-    "name": "IN",
-    "home": {
-      "x": 0.0,
-      "y": 0.0,
-      "yaw": 0.0
-    }
-  },
-  "0": {
-    "name": "ABOLU",
-    "home": {
-      "x": 0.2965558220227049,
-      "y": 1.7349166104377212,
-      "yaw": -0.8130644175871793
+      "x": 4.92,
+      "y": 2.13,
+      "yaw": -3.08
     }
   },
   "4": {
-    "name": "STOPPED",
+    "name": "JOHN PATH",
     "home": {
-      "x": -0.1,
-      "y": 5.48,
-      "yaw": -1.12
-    }
-  },
-  "5": {
-    "name": "STOPPED",
-    "home": {
-      "x": 0.09,
-      "y": 3.55,
-      "yaw": -1.12
-    }
-  },
-  "6": {
-    "name": "TEST",
-    "home": {
-      "x": 0.09,
-      "y": 3.55,
-      "yaw": -1.12
-    }
-  },
-  "7": {
-    "name": "MOVED BACKWARDS",
-    "home": {
-      "x": 0.13,
-      "y": 4.39,
-      "yaw": -1.08
-    }
-  },
-  "8": {
-    "name": "LEFT TURN",
-    "home": {
-      "x": 7.46,
-      "y": 0.76,
-      "yaw": -0.57
-    }
-  },
-  "9": {
-    "name": "RIGNT THEN LEFT",
-    "home": {
-      "x": 5.19,
-      "y": -2.49,
-      "yaw": -0.52
-    }
-  },
-  "10": {
-    "name": "BACKWARDS LOOPY",
-    "home": {
-      "x": 4.32,
-      "y": -0.17,
-      "yaw": 0.0
+      "x": 4.91,
+      "y": 2.14,
+      "yaw": -3.08
     }
   }
+>>>>>>> Stashed changes
 }
