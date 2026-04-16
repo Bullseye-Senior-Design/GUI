@@ -1,20 +1,9 @@
 Remove as we finish thingys
 ---------------------------
-5. Start up check
-- The ping thing i talked about, don't leave the start screen until we connect with the ping
-- pi send its battery SoC to repsond so the controller is updated
-3. Boundary defining for arena
-- defining the dimensions of the rectangle we use for the areana so they give widths and length
-- maybe save on a CSV or json to persist on shutdown
-4. Create a button for setting home position
-- This will replace the return button on the free drive screen
-- it sends a packet to the pi to get the current X,Y, theta and sets that as our home position
-- Also save this on csv to persist on shutdown
-5. Display the home position of the bot on the arena
-- Will show the arena as just a rectangle with maybe the dimensions
-- Show the home position as a green dot with an arrow pointing towards the theta
-- CANNOT EDIT without using freedrive to reset
-6. Error messages added when messages are not received... (KFX, Route Saved, Home position, Connect ping)
+1. Robot comms safety
+- If we haven't received a packet from contoller in X sec send ping, if you don't receive ping in x sec shut tf down
+2. Error packet popups across top of the screen with an X button
+3. Check the rectangle size for home setting screen
 
 9. Data Packet Dropout
 - Currently operatable but not good practice
@@ -24,14 +13,12 @@ Remove as we finish thingys
 10. OPTIONAL... Sensor fault
 - Save for later
 - if there is a sensor fault display on the user screen fault in X sensor cannot run routes only free drive or something
-1. Battery Icons
-- Update them both not to be emojis if we can make them progress bars but distiguisable so maybe a outline bull
-- Controller outline that fills
-- Keep percents by them
+11. change the error message to "no response from bullseye -- hpme "position in error state - set home position again before running" 
+12. only display paths that the home position is currently set...?
+13. return to home button tp be removed from the home settings page 
+
 
 -----------------
-1. CONTROLLER SETTINGS...
-- Do we need this or just delete it
 2. GUI Navigation
 - Using arrow keys and A to navigate menu
 3. Cursor issues
@@ -48,3 +35,24 @@ Finished: wait what....
 - little box in the bottom left of the screen for e-stop
 - it will send the user back to the homescreen and state change to 0 or disabled
 - it will also print a message for the user at the top of the gui for them to click free drive to continue
+5. Start up check
+- The ping thing i talked about, don't leave the start screen until we connect with the ping
+- pi send its battery SoC to repsond so the controller is updated
+3. Boundary defining for arena
+- defining the dimensions of the rectangle we use for the areana so they give widths and length
+- maybe save on a CSV or json to persist on shutdown
+4. Create a button for setting home position
+- This will replace the return button on the free drive screen
+- it sends a packet to the pi to get the current X,Y, theta and sets that as our home position
+- Also save this on csv to persist on shutdown
+5. Display the home position of the bot on the arena
+- Will show the arena as just a rectangle with maybe the dimensions
+- Show the home position as a green dot with an arrow pointing towards the theta
+- CANNOT EDIT without using freedrive to reset
+6. Error messages added when messages are not received... (KFX, Route Saved, Home position, Connect ping) 
+1. Battery Icons
+- Update them both not to be emojis if we can make them progress bars but distiguisable so maybe a outline bull
+- Controller outline that fills
+- Keep percents by them
+1. CONTROLLER SETTINGS...
+- Do we need this or just delete it
