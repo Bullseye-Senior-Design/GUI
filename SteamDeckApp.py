@@ -1299,6 +1299,19 @@ class FreeDriveScreen(BaseScreen):
         self._status_lbl.configure(text="Fetching position...", text_color=C_MUTED)
         with self.state.lock:
             self.state.joystick_active = False
+
+        # Drop stale position samples so the next pos_data is from this request.
+        unmatched = []
+        while not self.state.event_queue.empty():
+            try:
+                event = self.state.event_queue.get_nowait()
+            except Exception:
+                break
+            if event.get("type") != "pos_data":
+                unmatched.append(event)
+        for e in unmatched:
+            self.state.event_queue.put(e)
+
         enqueue_packet(self.state, "request_pos")
         self._timeout_remaining = ACK_TIMEOUT_MS // 200
         self._poll_id = self.after(200, self._poll_set_home)
@@ -1324,8 +1337,8 @@ class FreeDriveScreen(BaseScreen):
                     break
                 etype = event.get("type")
                 if self._set_home_stage == "req_pos" and etype == "pos_data":
+                    # Keep the newest pos_data if multiple are queued.
                     found = event
-                    break
                 elif self._set_home_stage == "set_home" and etype == "home_ack":
                     found = event
                     break
