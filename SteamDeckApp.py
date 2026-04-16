@@ -589,6 +589,10 @@ class SerialRXThread(threading.Thread):
             elif packet.type == "kfx_speed_ack":
                 self.app_state.event_queue.put({"type": "kfx_speed_ack"})
 
+            elif packet.type == "ping":
+                # Pi's watchdog is checking we're alive — reply immediately
+                enqueue_packet(self.app_state, "ping_ack")
+
             elif packet.type == "ping_ack":
                 ack = PingAckData.model_validate_json(packet.json_data)
                 with self.app_state.lock:
@@ -614,6 +618,20 @@ class SerialRXThread(threading.Thread):
                 self.app_state.event_queue.put({
                     "type": "record_home_check_result",
                     "ok": result.ok,
+                })
+
+            elif packet.type == "error":
+                data = json.loads(packet.json_data)
+                self.app_state.event_queue.put({
+                    "type": "error",
+                    "errstr": data.get("errstr", "Unknown error"),
+                })
+
+            elif packet.type == "route_finished":
+                data = json.loads(packet.json_data)
+                self.app_state.event_queue.put({
+                    "type": "route_finished",
+                    "message": data.get("message", "Route complete"),
                 })
 
         except Exception as e:
@@ -3139,9 +3157,6 @@ class HomeSettingsScreen(BaseScreen):
     On any ack timeout → inline error label shown under the action buttons.
     """
 
-    _CANVAS_W = 420
-    _CANVAS_H = 360
-
     def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
 
@@ -3172,10 +3187,10 @@ class HomeSettingsScreen(BaseScreen):
 
         self._canvas = tk.Canvas(
             left,
-            width=self._CANVAS_W, height=self._CANVAS_H,
             bg="#1a1a1a", highlightthickness=0,
         )
-        self._canvas.pack(padx=12, pady=8)
+        self._canvas.pack(fill="both", expand=True, padx=12, pady=8)
+        self._canvas.bind("<Configure>", lambda _: self._draw_map())
 
         # ── Right: controls ───────────────────────────────────────────────
         right = ctk.CTkFrame(body, fg_color="transparent", width=320)
@@ -3262,7 +3277,10 @@ class HomeSettingsScreen(BaseScreen):
     def _draw_map(self):
         """Draw the arena boundary and home position diamond."""
         self._canvas.delete("all")
-        W, H = self._CANVAS_W, self._CANVAS_H
+        W = self._canvas.winfo_width()
+        H = self._canvas.winfo_height()
+        if W <= 1 or H <= 1:
+            return  # Not yet laid out
         PAD = 32
 
         if not self._boundary or not self._boundary.get("corners"):
@@ -4137,6 +4155,89 @@ class OnScreenKeyboard:
 
 
 # ============================================================
+# PERSISTENT RIBBON WIDGETS
+# Full-width banners placed on the root window via place() so they
+# survive frame swaps.  Each has an ✕ button to dismiss.
+# ============================================================
+
+class ErrorRibbonWidget:
+    """
+    Red full-width ribbon shown whenever the Pi sends a type="error" packet.
+    Dismissed by pressing the ✕ button on the right side.
+    Lives on the root window so it persists across screen transitions.
+    """
+    _HEIGHT = 52
+
+    def __init__(self, root: ctk.CTk):
+        self._frame = ctk.CTkFrame(root, fg_color=C_DANGER, corner_radius=0,
+                                    height=self._HEIGHT)
+        self._lbl = ctk.CTkLabel(
+            self._frame, text="",
+            font=("Arial Bold", 16), text_color=C_TEXT,
+            anchor="w",
+        )
+        self._lbl.pack(side="left", fill="x", expand=True, padx=(16, 8), pady=8)
+
+        ctk.CTkButton(
+            self._frame, text="✕",
+            font=("Arial Bold", 18), width=44, height=36,
+            fg_color="#991a00", hover_color="#660d00",
+            text_color=C_TEXT, corner_radius=8,
+            command=self.hide,
+        ).pack(side="right", padx=(0, 10), pady=8)
+
+    def show(self, message: str):
+        self._lbl.configure(text=f"ERROR: {message}")
+        self._frame.place(x=0, y=50, anchor="nw", relwidth=1.0)
+        self._frame.lift()
+
+    def hide(self):
+        self._frame.place_forget()
+
+    def lift(self):
+        self._frame.lift()
+
+
+class RouteFinishedRibbonWidget:
+    """
+    Green full-width ribbon shown when the Pi signals a route or
+    return-to-home has completed (type="route_finished").
+    Dismissed by pressing the ✕ button on the right side.
+    Lives on the root window so it persists across screen transitions.
+    """
+    _HEIGHT = 52
+
+    def __init__(self, root: ctk.CTk):
+        self._frame = ctk.CTkFrame(root, fg_color=C_SUCCESS, corner_radius=0,
+                                    height=self._HEIGHT)
+        self._lbl = ctk.CTkLabel(
+            self._frame, text="",
+            font=("Arial Bold", 16), text_color=C_TEXT,
+            anchor="w",
+        )
+        self._lbl.pack(side="left", fill="x", expand=True, padx=(16, 8), pady=8)
+
+        ctk.CTkButton(
+            self._frame, text="✕",
+            font=("Arial Bold", 18), width=44, height=36,
+            fg_color="#145214", hover_color="#0d3a0d",
+            text_color=C_TEXT, corner_radius=8,
+            command=self.hide,
+        ).pack(side="right", padx=(0, 10), pady=8)
+
+    def show(self, message: str):
+        self._lbl.configure(text=message)
+        self._frame.place(x=0, y=50, anchor="nw", relwidth=1.0)
+        self._frame.lift()
+
+    def hide(self):
+        self._frame.place_forget()
+
+    def lift(self):
+        self._frame.lift()
+
+
+# ============================================================
 # E-STOP OVERLAY WIDGET
 # Persistent bottom-left button that lives on the root window
 # via place() so it survives frame swaps.
@@ -4333,11 +4434,19 @@ class BullseyeApp(ctk.CTk):
         # ── E-Stop overlay (persistent bottom-left button) ────────────────
         self._estop = EStopWidget(self, self, app_state)
 
+        # ── Persistent ribbon overlays ────────────────────────────────────
+        self._error_ribbon = ErrorRibbonWidget(self)
+        self._route_ribbon = RouteFinishedRibbonWidget(self)
+
         # ── Navigate to startup screen ────────────────────────────────────
         self.show_frame(StartupScreen)
 
         # ── Global event polling (path_created etc.) ──────────────────────
         self._poll_global_events()
+
+        # ── TEMP: show ribbons immediately for visual testing ─────────────
+        #self.after(2000, lambda: self._error_ribbon.show("Motor controller timeout"))
+        #self.after(10000, lambda: self._route_ribbon.show("Route complete"))
 
         # ── Handle window close button ────────────────────────────────────
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -4427,6 +4536,8 @@ class BullseyeApp(ctk.CTk):
         if self._overlay:
             self._overlay.lift()
         self._estop.lift()
+        self._error_ribbon.lift()
+        self._route_ribbon.lift()
 
     def toggle_debug_overlay(self, enabled: bool):
         """Show or hide the debug TX-log overlay."""
@@ -4463,6 +4574,11 @@ class BullseyeApp(ctk.CTk):
                     if isinstance(self._current_frame, RecordRouteScreen):
                         self.app_state.event_queue.put(event)
                     # else: stale — discard
+                elif event.get("type") == "error":
+                    self._error_ribbon.show(event.get("errstr", "Unknown error"))
+                elif event.get("type") == "route_finished":
+                    msg = event.get("message", "Route complete")
+                    self._route_ribbon.show(msg)
                 else:
                     # All other events belong to screen-level pollers; put back
                     self.app_state.event_queue.put(event)
