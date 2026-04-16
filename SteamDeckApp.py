@@ -4432,8 +4432,8 @@ class BullseyeApp(ctk.CTk):
         self._poll_global_events()
 
         # ── TEMP: show ribbons immediately for visual testing ─────────────
-        self.after(2000, lambda: self._error_ribbon.show("Motor controller timeout"))
-        self.after(10000, lambda: self._route_ribbon.show("Route complete"))
+        #self.after(2000, lambda: self._error_ribbon.show("Motor controller timeout"))
+        #self.after(10000, lambda: self._route_ribbon.show("Route complete"))
 
         # ── Handle window close button ────────────────────────────────────
         self.protocol("WM_DELETE_WINDOW", self._on_close)
