@@ -1,7 +1,26 @@
 {
+<<<<<<< Updated upstream
   "1": "Barrel Run",
   "3": "East Pasture",
   "25": "YTH",
   "35": "GT",
   "38": "TEST"
+=======
+  "1": {
+    "name": "THIS C9OOL",
+    "home": {
+      "x": 4.92,
+      "y": 2.13,
+      "yaw": -3.08
+    }
+  },
+  "4": {
+    "name": "JOHN PATH",
+    "home": {
+      "x": 4.91,
+      "y": 2.14,
+      "yaw": -3.08
+    }
+  }
+>>>>>>> Stashed changes
 }
