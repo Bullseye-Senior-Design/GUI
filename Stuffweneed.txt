@@ -3,20 +3,23 @@ Remove as we finish thingys
 1. Robot comms safety
 - If we haven't received a packet from contoller in X sec send ping, if you don't receive ping in x sec shut tf down
 
-
 9. Data Packet Dropout
 - Currently operatable but not good practice
 - Idek cry and hope it feels bad....
 - Slow down update rate...
 - See if we have anything interferring 
 
------------------
 2. GUI Navigation
 - Using arrow keys and A to navigate menu
-3. Cursor issues
+- Y is Estop
+3. Increase the font on some screens
+- Make sure not to break everything
+
+4. Cursor issues
 - Figure out how to get the right stick to stop running the damn mouse
 - orrr remove highlighting until you hit a button so we don't even know and Michael doesn't cry
 
+--------------------------------------------------------------------------------------------------------------------------
 Finished: wait what....
 1. Path Creation logic 
 - take route and save it to JSON file
