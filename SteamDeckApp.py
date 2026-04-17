@@ -1644,6 +1644,17 @@ class RecordRouteScreen(BaseScreen):
         if not timed_out and home:
             self._cur_pos_lbl.configure(text="Current:  fetching...", text_color=C_MUTED)
             self._cur_pos_lbl.pack(pady=(0, 14))
+            # Drop stale position samples so the next pos_data is from this request.
+            unmatched = []
+            while not self.state.event_queue.empty():
+                try:
+                    event = self.state.event_queue.get_nowait()
+                except Exception:
+                    break
+                if event.get("type") != "pos_data":
+                    unmatched.append(event)
+            for e in unmatched:
+                self.state.event_queue.put(e)
             enqueue_packet(self.state, "request_pos")
             self._pos_timeout_remaining = 10  # 10 × 200 ms = 2 s
             self._pos_poll_id = self.after(200, self._poll_cur_pos)
@@ -2466,6 +2477,17 @@ class RunRouteScreen(BaseScreen):
             self._check_detail_lbl.configure(text=home_line)
             # Request current position from Pi so we can display it
             self._check_cur_pos_lbl.configure(text="Current:  fetching...", text_color=C_MUTED)
+            # Drop stale position samples so the next pos_data is from this request.
+            unmatched = []
+            while not self.state.event_queue.empty():
+                try:
+                    event = self.state.event_queue.get_nowait()
+                except Exception:
+                    break
+                if event.get("type") != "pos_data":
+                    unmatched.append(event)
+            for e in unmatched:
+                self.state.event_queue.put(e)
             enqueue_packet(self.state, "request_pos")
             self._pos_timeout_remaining = 10  # 10 × 200 ms = 2 s
             self._pos_poll_id = self.after(200, self._poll_cur_pos)
