@@ -21,7 +21,7 @@
 # ============================================================
 DEBUG_OVERLAY      = False    # Show semi-transparent TX log overlay on screen
 REQUIRE_CONNECTION = False   # True = halt on missing XBee; False = UI-only mode
-STARTUP            = True    # True = show START button (debug bypass); False = lock on startup until ping_ack
+STARTUP            = False    # True = show START button (debug bypass); False = lock on startup until ping_ack
 KFX_SPEED          = 0.5     # Global KFX run speed (0.0–1.0); sent to Pi via kfx_speed packet
 # ============================================================
 
@@ -1034,9 +1034,22 @@ class StartupScreen(BaseScreen):
                 font=("Arial Black", 32),
                 text_color=C_MUTED,
             )
-            self._status_label.pack(pady=(0, 100))
+            self._status_label.pack(pady=(0, 20))
+
+            self._exit_btn = ctk.CTkButton(
+                center,
+                text="EXIT",
+                width=200, height=60,
+                font=("Arial Black", 24),
+                fg_color=C_DANGER,
+                hover_color="#991a00",
+                command=self.app.quit,
+            )
+            self._exit_btn_id: str | None = None
+
             self._dot_count = 0
             self._start_ping_loop()
+            self._exit_btn_id = self.after(5000, self._show_exit_button)
 
     def _start_ping_loop(self):
         """Begin sending ping packets every PING_INTERVAL_MS ms."""
@@ -1099,8 +1112,15 @@ class StartupScreen(BaseScreen):
         except Exception:
             pass
 
+    def _show_exit_button(self):
+        try:
+            if self.winfo_exists():
+                self._exit_btn.pack(pady=(20, 80))
+        except Exception:
+            pass
+
     def _cancel_timers(self):
-        for attr in ("_ping_id", "_poll_id"):
+        for attr in ("_ping_id", "_poll_id", "_exit_btn_id"):
             id_ = getattr(self, attr, None)
             if id_ is not None:
                 try:
