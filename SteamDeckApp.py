@@ -65,7 +65,6 @@ PORT       = Constants.controller_serial_port    # XBee USB serial port
 BAUD       = Constants.serial_baud_rate          # XBee baud rate
 PING_INTERVAL_MS  = 500                          # ms between ping packets on startup screen
 ACK_TIMEOUT_MS    = 1000                         # ms before any ack is considered timed out
-HOME_MATCH_TOLERANCE = 0.0  # 0.0 = exact match; increase for positional tolerance (metres / degrees)
 
 # ── Color palette ─────────────────────────────────────────────────────────────
 C_PRIMARY   = "#5c5c5c"   # Dark grey   – inactive buttons, phone body
@@ -221,47 +220,6 @@ def save_home(home: dict):
             json.dump(home, f, indent=2)
     except Exception as e:
         print(f"[STORAGE] Could not save home.json: {e}")
-
-
-def homes_match(h1: dict | None, h2: dict | None) -> bool:
-    """Return True if two home-position dicts are considered equal.
-
-    With HOME_MATCH_TOLERANCE == 0.0 this is an exact float comparison.
-    Raise the tolerance value to accept nearby positions.
-    """
-    if h1 is None or h2 is None:
-        return False
-    if HOME_MATCH_TOLERANCE == 0.0:
-        return h1["x"] == h2["x"] and h1["y"] == h2["y"] and h1["yaw"] == h2["yaw"]
-    return (
-        abs(h1["x"] - h2["x"]) <= HOME_MATCH_TOLERANCE
-        and abs(h1["y"] - h2["y"]) <= HOME_MATCH_TOLERANCE
-        and abs(h1["yaw"] - h2["yaw"]) <= HOME_MATCH_TOLERANCE
-    )
-
-
-def clear_kfx_for_home_mismatch(state, new_home: dict):
-    """Clear any KFX slot whose assigned route home doesn't match new_home.
-
-    Saves kfx_config.json and enqueues the updated packet if anything changed.
-    """
-    with state.lock:
-        routes = dict(state.routes)
-        kfx = dict(state.kfx_config)
-    changed = False
-    for btn_num, assigned_id in kfx.items():
-        if assigned_id is None:
-            continue
-        route = routes.get(str(assigned_id), {})
-        route_home = route.get("home") if isinstance(route, dict) else None
-        if not homes_match(route_home, new_home):
-            kfx[btn_num] = None
-            changed = True
-    if changed:
-        with state.lock:
-            state.kfx_config = kfx
-        save_kfx_config(kfx)
-        enqueue_packet(state, "kfx_config", json.dumps(kfx))
 
 
 def migrate_routes(raw: dict) -> dict:
@@ -1233,19 +1191,6 @@ class FreeDriveScreen(BaseScreen):
                         command=self._confirmed_set_home,
                         color=C_SUCCESS, width=180, height=70).pack(side="right", padx=20)
 
-        # ── Home error overlay (hidden until a set-home attempt times out) ─
-        self._home_error_frame = ctk.CTkFrame(self, fg_color=C_SURFACE,
-                                               corner_radius=16, width=680, height=300)
-        ctk.CTkLabel(self._home_error_frame,
-                     text="No response from Bullseye",
-                     font=("Arial Bold", 28), text_color=C_DANGER).pack(pady=(34, 6))
-        ctk.CTkLabel(self._home_error_frame,
-                     text="Home position in error state\nSet home position again before running.",
-                     font=("Arial", 20), text_color=C_TEXT, justify="center").pack(pady=(0, 24))
-        make_nav_button(self._home_error_frame, "OK",
-                        command=self._dismiss_home_error,
-                        color=C_SECONDARY, width=180, height=60).pack(pady=(0, 30))
-
         # ── Bottom button bar ─────────────────────────────────────────────
         btn_bar = ctk.CTkFrame(self, fg_color="transparent")
         btn_bar.pack(side="bottom", pady=35)
@@ -1352,7 +1297,6 @@ class FreeDriveScreen(BaseScreen):
                     with self.state.lock:
                         self.state.home_pos = dict(self._pending_pos)
                     save_home(self._pending_pos)
-                    clear_kfx_for_home_mismatch(self.state, self._pending_pos)
                     self._finish_set_home(success=True)
                     return
         except Exception:
@@ -1380,12 +1324,11 @@ class FreeDriveScreen(BaseScreen):
             self._status_lbl.configure(text="Home position set!", text_color=C_SUCCESS)
             self.after(3000, lambda: self._status_lbl.configure(text=""))
         else:
-            self._home_error_frame.place(relx=0.5, rely=0.5, anchor="center")
-            self._home_error_frame.lift()
-
-    def _dismiss_home_error(self):
-        """Dismiss the home-error modal."""
-        self._home_error_frame.place_forget()
+            self._status_lbl.configure(
+                text="No response from Bullseye — home not set. Try again.",
+                text_color=C_DANGER,
+            )
+            self.after(5000, lambda: self._status_lbl.configure(text=""))
 
     def _cancel_poll(self):
         if self._poll_id is not None:
@@ -1459,8 +1402,6 @@ class RecordRouteScreen(BaseScreen):
         self._stage: str = "checking"
         self._poll_id: str | None = None
         self._finish_timeout_id: str | None = None
-        self._pos_poll_id: str | None = None
-        self._pos_timeout_remaining: int = 0
         self._check_timeout_remaining: int = ACK_TIMEOUT_MS // 200
         self.bind("<Destroy>", self._on_destroy)
 
@@ -1481,11 +1422,6 @@ class RecordRouteScreen(BaseScreen):
         self._error_detail_lbl = ctk.CTkLabel(
             self._center, text="",
             font=("Arial", 22), text_color=C_MUTED, justify="center",
-        )
-        # Current position label — shown below error detail when pos fetch succeeds
-        self._cur_pos_lbl = ctk.CTkLabel(
-            self._center, text="",
-            font=("Arial", 20), text_color=C_MUTED, justify="center",
         )
 
         # ── Bottom button bar ─────────────────────────────────────────────
@@ -1596,7 +1532,7 @@ class RecordRouteScreen(BaseScreen):
             detail = "No response from Bullseye.\nCheck connection and try again."
         elif home:
             detail = (
-                f"Home:     X: {home['x']:.2f}  Y: {home['y']:.2f}  "
+                f"Home is set to  X: {home['x']:.2f}  Y: {home['y']:.2f}  "
                 f"Yaw: {home['yaw']:.1f}°\n"
                 "Return to that position before recording."
             )
@@ -1607,65 +1543,12 @@ class RecordRouteScreen(BaseScreen):
             )
 
         self._error_detail_lbl.configure(text=detail)
-        self._error_detail_lbl.pack(pady=(0, 6))
-
-        # Fetch and display current position (non-timeout failures only)
-        if not timed_out and home:
-            self._cur_pos_lbl.configure(text="Current:  fetching...", text_color=C_MUTED)
-            self._cur_pos_lbl.pack(pady=(0, 14))
-            enqueue_packet(self.state, "request_pos")
-            self._pos_timeout_remaining = 10  # 10 × 200 ms = 2 s
-            self._pos_poll_id = self.after(200, self._poll_cur_pos)
-        else:
-            self._cur_pos_lbl.pack_forget()
+        self._error_detail_lbl.pack(pady=(0, 20))
 
         # Swap finish/cancel for a single back-to-menu button
         self._cancel_btn.pack_forget()
         self._finish_btn.pack_forget()
         self._back_btn.pack(pady=10)
-
-    def _poll_cur_pos(self):
-        """Poll for pos_data after a failed home check to display current position."""
-        self._pos_poll_id = None
-        try:
-            if not self.winfo_exists():
-                return
-        except Exception:
-            return
-
-        try:
-            unmatched = []
-            found = None
-            while not self.state.event_queue.empty():
-                try:
-                    event = self.state.event_queue.get_nowait()
-                except Exception:
-                    break
-                if event.get("type") == "pos_data":
-                    found = event
-                    break
-                else:
-                    unmatched.append(event)
-            for e in unmatched:
-                self.state.event_queue.put(e)
-
-            if found is not None:
-                x, y, yaw = found["x"], found["y"], found["yaw"]
-                self._cur_pos_lbl.configure(
-                    text=f"Current:  X: {x:.2f}  Y: {y:.2f}  Yaw: {yaw:.1f}°"
-                )
-                return
-        except Exception:
-            pass
-
-        self._pos_timeout_remaining -= 1
-        if self._pos_timeout_remaining <= 0:
-            self._cur_pos_lbl.pack_forget()
-            return
-        try:
-            self._pos_poll_id = self.after(200, self._poll_cur_pos)
-        except Exception:
-            pass
 
     def _back_to_menu(self):
         """Navigate back to the main menu after a check failure."""
@@ -1759,7 +1642,7 @@ class RecordRouteScreen(BaseScreen):
     # ── Cleanup ────────────────────────────────────────────────────────────
 
     def _cancel_all_timers(self):
-        for attr in ("_poll_id", "_finish_timeout_id", "_pos_poll_id"):
+        for attr in ("_poll_id", "_finish_timeout_id"):
             id_ = getattr(self, attr, None)
             if id_ is not None:
                 try:
@@ -1904,12 +1787,9 @@ class RunRouteScreen(BaseScreen):
         self._selected_id: int | None = None
         self._route_buttons: dict = {}        # route_id (int) → CTkButton (main row)
         self._route_action_frames: dict = {}  # route_id (int) → CTkFrame (hidden sub-row)
-        self._route_valid: dict = {}          # route_id (int) → bool (home matches current)
         self._expanded_id: int | None = None  # which row is currently expanded
         self._is_running: bool = False
         self._poll_id: str | None = None
-        self._pos_poll_id: str | None = None  # separate poll for current-pos fetch
-        self._pos_timeout_remaining: int = 0
         self._check_timeout_remaining: int = 0
         self.bind("<Destroy>", self._on_destroy)
 
@@ -1997,25 +1877,19 @@ class RunRouteScreen(BaseScreen):
         # ── Home-check result overlay (shown after check fails) ───────────
         self._check_overlay = ctk.CTkFrame(
             self, fg_color=C_SURFACE, corner_radius=20,
-            width=700, height=320,
+            width=660, height=260,
             border_width=2, border_color=C_DANGER,
         )
         self._check_overlay_lbl = ctk.CTkLabel(
             self._check_overlay, text="",
             font=("Arial Bold", 24), text_color=C_DANGER,
-            wraplength=640, justify="center",
+            wraplength=600, justify="center",
         )
-        self._check_overlay_lbl.pack(pady=(28, 8))
-        self._check_cur_pos_lbl = ctk.CTkLabel(
-            self._check_overlay, text="",
-            font=("Arial", 16), text_color=C_MUTED,
-            wraplength=640, justify="center",
-        )
-        self._check_cur_pos_lbl.pack(pady=(0, 2))
+        self._check_overlay_lbl.pack(pady=(32, 6))
         self._check_detail_lbl = ctk.CTkLabel(
             self._check_overlay, text="",
             font=("Arial", 16), text_color=C_MUTED,
-            wraplength=640, justify="center",
+            wraplength=600, justify="center",
         )
         self._check_detail_lbl.pack(pady=(0, 10))
         ctk.CTkButton(
@@ -2024,7 +1898,7 @@ class RunRouteScreen(BaseScreen):
             font=("Arial Bold", 22), fg_color=C_PRIMARY,
             hover_color=C_SECONDARY, text_color=C_TEXT,
             corner_radius=12, width=160, height=55,
-        ).pack(pady=(0, 24))
+        ).pack(pady=(0, 28))
 
         # ── Run-confirm overlay (shown after home check passes) ───────────
         self._run_confirm_frame = ctk.CTkFrame(
@@ -2088,23 +1962,16 @@ class RunRouteScreen(BaseScreen):
         ).pack(side="right", padx=16)
 
     def _build_route_list(self):
-        """Populate the scrollable route list from app_state.routes.
-
-        Valid routes (home matches current home position) are sorted to the top
-        and shown normally.  Routes with a mismatched or missing home are grayed
-        out and cannot be selected for running, but can still be renamed/deleted.
-        """
+        """Populate the scrollable route list from app_state.routes."""
         for w in self._route_scroll.winfo_children():
             w.destroy()
         self._route_buttons.clear()
         self._route_action_frames.clear()
-        self._route_valid.clear()
         self._expanded_id = None
         self._selected_id = None
 
         with self.state.lock:
             routes = dict(self.state.routes)
-            current_home = dict(self.state.home_pos) if self.state.home_pos else None
 
         if not routes:
             ctk.CTkLabel(self._route_scroll,
@@ -2113,20 +1980,10 @@ class RunRouteScreen(BaseScreen):
                          justify="center").pack(pady=50)
             return
 
-        # Determine validity and sort: valid routes first, invalid last.
-        def _route_valid_check(item):
-            entry = item[1]
-            route_home = entry.get("home") if isinstance(entry, dict) else None
-            return homes_match(route_home, current_home)
-
-        sorted_routes = sorted(routes.items(), key=_route_valid_check, reverse=True)
-
-        for route_id_str, entry in sorted_routes:
+        for route_id_str, entry in routes.items():
             rid = int(route_id_str)
             name = entry.get("name", "") if isinstance(entry, dict) else str(entry)
             home = entry.get("home") if isinstance(entry, dict) else None
-            valid = homes_match(home, current_home)
-            self._route_valid[rid] = valid
 
             # Home position sub-text
             if home:
@@ -2134,16 +1991,6 @@ class RunRouteScreen(BaseScreen):
                              f"  Yaw {home['yaw']:.1f}°")
             else:
                 home_text = "Home: not set"
-
-            # Visual treatment based on validity
-            if valid:
-                btn_fg       = C_SURFACE
-                btn_hover    = C_SECONDARY
-                btn_text_clr = C_TEXT
-            else:
-                btn_fg       = C_PRIMARY
-                btn_hover    = C_PRIMARY   # no hover effect — non-runnable
-                btn_text_clr = C_MUTED
 
             # Outer container — holds row button + collapsible action frame
             outer = ctk.CTkFrame(self._route_scroll, fg_color="transparent")
@@ -2154,8 +2001,8 @@ class RunRouteScreen(BaseScreen):
                 outer,
                 text=f"  {name}   (ID {rid})\n  {home_text}",
                 font=("Arial Bold", 16),
-                fg_color=btn_fg, hover_color=btn_hover,
-                text_color=btn_text_clr, corner_radius=8,
+                fg_color=C_SURFACE, hover_color=C_SECONDARY,
+                text_color=C_TEXT, corner_radius=8,
                 height=72, anchor="w",
                 command=lambda r=rid: self._tap_route(r),
             )
@@ -2184,12 +2031,7 @@ class RunRouteScreen(BaseScreen):
             if af:
                 af.pack_forget()
             if old in self._route_buttons:
-                if old == self._selected_id:
-                    color = C_TERTIARY
-                elif self._route_valid.get(old, True):
-                    color = C_SURFACE
-                else:
-                    color = C_PRIMARY
+                color = C_TERTIARY if old == self._selected_id else C_SURFACE
                 self._route_buttons[old].configure(fg_color=color)
 
         if self._expanded_id == route_id:
@@ -2198,15 +2040,6 @@ class RunRouteScreen(BaseScreen):
             if af:
                 af.pack_forget()
             self._expanded_id = None
-            # Restore the base color for this row on collapse
-            if route_id in self._route_buttons:
-                if route_id == self._selected_id:
-                    self._route_buttons[route_id].configure(fg_color=C_TERTIARY)
-                elif self._route_valid.get(route_id, True):
-                    self._route_buttons[route_id].configure(fg_color=C_SURFACE)
-                else:
-                    self._route_buttons[route_id].configure(fg_color=C_PRIMARY)
-            return
         else:
             # Expand this row
             self._expanded_id = route_id
@@ -2215,26 +2048,12 @@ class RunRouteScreen(BaseScreen):
                 self._populate_action_normal(route_id, af)
                 af.pack(fill="x", padx=4, pady=(0, 4))
 
-        # Select this route for running only if its home matches the current home.
-        # Invalid routes still expand (for rename/delete) but cannot be queued to run.
-        is_valid = self._route_valid.get(route_id, True)
-        for rid, btn in self._route_buttons.items():
-            if self._route_valid.get(rid, True):
-                btn.configure(fg_color=C_SURFACE)
-            else:
-                btn.configure(fg_color=C_PRIMARY)
-        if is_valid:
-            self._selected_id = route_id
-            if route_id in self._route_buttons:
-                self._route_buttons[route_id].configure(fg_color=C_TERTIARY)
-        else:
-            # Don't change _selected_id — invalid route can't be run.
-            # Give the expanded invalid row a slightly lighter shade so the user
-            # can see it opened, but keep gold on any still-selected valid route.
-            if route_id in self._route_buttons:
-                self._route_buttons[route_id].configure(fg_color=C_SECONDARY)
-            if self._selected_id is not None and self._selected_id in self._route_buttons:
-                self._route_buttons[self._selected_id].configure(fg_color=C_TERTIARY)
+        # Always select this route for running
+        for btn in self._route_buttons.values():
+            btn.configure(fg_color=C_SURFACE)
+        self._selected_id = route_id
+        if route_id in self._route_buttons:
+            self._route_buttons[route_id].configure(fg_color=C_TERTIARY)
 
     def _populate_action_normal(self, route_id: int, frame: ctk.CTkFrame):
         """Fill the action frame with [RENAME] [DELETE] buttons."""
@@ -2418,7 +2237,6 @@ class RunRouteScreen(BaseScreen):
         """Home check failed — show overlay with reason, re-enable RUN."""
         self._run_btn.configure(state="normal")
         self._home_btn.configure(state="normal")
-        self._check_cur_pos_lbl.configure(text="")
         if timed_out:
             self._check_overlay_lbl.configure(text="NO RESPONSE FROM BULLSEYE")
             self._check_detail_lbl.configure(text="Check connection and try again.")
@@ -2426,75 +2244,20 @@ class RunRouteScreen(BaseScreen):
             with self.state.lock:
                 home = self.state.home_pos
             if home:
-                home_line = (f"Home:     X: {home['x']:.2f}  Y: {home['y']:.2f}"
-                             f"  Yaw: {home['yaw']:.1f}°\n"
-                             "Return to that position before running.")
+                detail = (f"Home is  X: {home['x']:.2f}  Y: {home['y']:.2f}"
+                          f"  Yaw: {home['yaw']:.1f}°\n"
+                          "Return to that position before running.")
             else:
-                home_line = "No home position set.\nGo to Settings → Bot Settings → Home Settings."
+                detail = "No home position set.\nGo to Settings → Bot Settings → Home Settings."
             self._check_overlay_lbl.configure(text="NOT AT HOME POSITION")
-            self._check_detail_lbl.configure(text=home_line)
-            # Request current position from Pi so we can display it
-            self._check_cur_pos_lbl.configure(text="Current:  fetching...", text_color=C_MUTED)
-            enqueue_packet(self.state, "request_pos")
-            self._pos_timeout_remaining = 10  # 10 × 200 ms = 2 s
-            self._pos_poll_id = self.after(200, self._poll_cur_pos)
+            self._check_detail_lbl.configure(text=detail)
         self._show_backdrop()
         self._check_overlay.place(relx=0.5, rely=0.5, anchor="center")
         self._check_overlay.lift()
 
     def _dismiss_check_overlay(self):
-        # Cancel any in-flight position poll before closing
-        if self._pos_poll_id is not None:
-            try:
-                self.after_cancel(self._pos_poll_id)
-            except Exception:
-                pass
-            self._pos_poll_id = None
         self._check_overlay.place_forget()
         self._hide_backdrop()
-
-    def _poll_cur_pos(self):
-        """Poll event_queue for pos_data after a failed home check."""
-        self._pos_poll_id = None
-        try:
-            if not self.winfo_exists():
-                return
-        except Exception:
-            return
-
-        try:
-            unmatched = []
-            found = None
-            while not self.state.event_queue.empty():
-                try:
-                    event = self.state.event_queue.get_nowait()
-                except Exception:
-                    break
-                if event.get("type") == "pos_data":
-                    found = event
-                    break
-                else:
-                    unmatched.append(event)
-            for e in unmatched:
-                self.state.event_queue.put(e)
-
-            if found is not None:
-                x, y, yaw = found["x"], found["y"], found["yaw"]
-                self._check_cur_pos_lbl.configure(
-                    text=f"Current:  X: {x:.2f}  Y: {y:.2f}  Yaw: {yaw:.1f}°"
-                )
-                return
-        except Exception:
-            pass
-
-        self._pos_timeout_remaining -= 1
-        if self._pos_timeout_remaining <= 0:
-            self._check_cur_pos_lbl.configure(text="")
-            return
-        try:
-            self._pos_poll_id = self.after(200, self._poll_cur_pos)
-        except Exception:
-            pass
 
     # ── Run-confirm overlay ────────────────────────────────────────────────
 
@@ -2541,13 +2304,11 @@ class RunRouteScreen(BaseScreen):
         self._home_btn.pack(pady=8)
 
     def _on_destroy(self, *_):
-        for attr in ("_poll_id", "_pos_poll_id"):
-            id_ = getattr(self, attr, None)
-            if id_ is not None:
-                try:
-                    self.after_cancel(id_)
-                except Exception:
-                    pass
+        if self._poll_id is not None:
+            try:
+                self.after_cancel(self._poll_id)
+            except Exception:
+                pass
 
     def _press_return_home(self):
         """Show confirm overlay before returning home."""
@@ -3341,7 +3102,6 @@ class HomeSettingsScreen(BaseScreen):
                 with self.state.lock:
                     self.state.home_pos = dict(self._pending_home)
                 save_home(self._pending_home)
-                clear_kfx_for_home_mismatch(self.state, self._pending_home)
                 self._home = dict(self._pending_home)
                 self._draw_map()
                 self._action_stage = "idle"
@@ -3357,7 +3117,7 @@ class HomeSettingsScreen(BaseScreen):
         if self._timeout_remaining <= 0:
             self._update_btn.configure(state="normal", text="UPDATE HOME")
             self._status_lbl.configure(
-                text="No response from Bullseye — home not updated. Try again.",
+                text="No response from Bullseye — home position in error state -- Set home position again before running.",
                 text_color=C_DANGER,
             )
             self._action_stage = "idle"
@@ -3477,7 +3237,6 @@ class KFXSettingsScreen(BaseScreen):
             # Local working copy – only committed to shared state on SAVE
             self._config: dict = dict(self.state.kfx_config)
             self._routes: dict = dict(self.state.routes)
-            self._home_pos: dict | None = dict(self.state.home_pos) if self.state.home_pos else None
 
         self._selected_btn: str | None = None    # e.g. "3", "5"
         self._phone_buttons: dict = {}           # btn_num_str → CTkButton widget
@@ -3635,12 +3394,7 @@ class KFXSettingsScreen(BaseScreen):
         ctk.CTkLabel(parent,
                      text="① Select a remote button (1–6)\n② Tap a route to assign it",
                      font=("Arial", 13), text_color=C_MUTED,
-                     justify="center").pack(pady=(0, 2))
-
-        ctk.CTkLabel(parent,
-                     text="Only routes matching your current home are shown.",
-                     font=("Arial", 11), text_color=C_MUTED,
-                     justify="center").pack(pady=(0, 8))
+                     justify="center").pack(pady=(0, 10))
 
         # Column header row
         hdr = ctk.CTkFrame(parent, fg_color=C_BG, corner_radius=0)
@@ -3706,29 +3460,8 @@ class KFXSettingsScreen(BaseScreen):
                          font=("Arial", 15), text_color=C_MUTED).pack(pady=30)
             return
 
-        # Filter routes to only those whose home matches the current home position
-        matching_routes = {
-            rid_str: entry
-            for rid_str, entry in self._routes.items()
-            if homes_match(
-                entry.get("home") if isinstance(entry, dict) else None,
-                self._home_pos,
-            )
-        }
-
-        if not matching_routes:
-            msg = (
-                "No routes match your current home position."
-                if self._home_pos is not None
-                else "No home position set.\nSet a home position to assign routes."
-            )
-            ctk.CTkLabel(scroll, text=msg,
-                         font=("Arial", 15), text_color=C_MUTED,
-                         justify="center").pack(pady=30)
-            return
-
         # ── Route rows ────────────────────────────────────────────────────
-        for route_id_str, entry in matching_routes.items():
+        for route_id_str, entry in self._routes.items():
             rid = int(route_id_str)
             name = entry.get("name", "") if isinstance(entry, dict) else str(entry)
             row = ctk.CTkFrame(scroll, fg_color=C_SURFACE, corner_radius=6)
@@ -4166,12 +3899,15 @@ class EStopWidget:
         """Re-raise above any newly packed content frame."""
         self._btn.lift()
 
+    #def _on_press(self):
+    #    enqueue_state(self._state, State.DISABLED)
+    #    with self._state.lock:
+    #        self._state.joystick_active = False
+    #        self._state.e_stop_active = True
+    #    self._app.show_frame(MainMenuScreen)
+
     def _on_press(self):
-        enqueue_state(self._state, State.DISABLED)
-        with self._state.lock:
-            self._state.joystick_active = False
-            self._state.e_stop_active = True
-        self._app.show_frame(MainMenuScreen)
+     self._app.trigger_emergency_stop()
 
 
 # ============================================================
@@ -4198,9 +3934,13 @@ class BullseyeApp(ctk.CTk):
         super().__init__()
 
         self.app_state = app_state
+
+        self._prev_y_pressed = False
         self._joystick_thread = joystick_thread
         self._tx_thread = tx_thread
         self._rx_thread = rx_thread
+
+        self.after(50,self._poll_global_inputs)
 
         # ── Window configuration ──────────────────────────────────────────
         self.title("Bullseye Controller")
@@ -4209,6 +3949,7 @@ class BullseyeApp(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         self.configure(fg_color=C_BG)
+
 
         # ── Fullscreen on Steam Deck (Linux) ──────────────────────────────
         # On Windows (dev machine) the 1280×800 window stays windowed.
@@ -4228,6 +3969,7 @@ class BullseyeApp(ctk.CTk):
                                       height=50, corner_radius=0)
         self._top_bar.pack(fill="x", side="top")
         self._top_bar.pack_propagate(False)   # Keep fixed height
+
 
         # ── Load and crop the combined bull+controller icon image ─────────
         # The source image is a side-by-side pair: bull (left half) and
@@ -4329,6 +4071,29 @@ class BullseyeApp(ctk.CTk):
         # ── Handle window close button ────────────────────────────────────
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _poll_global_inputs(self):
+             """Catch global controller shortcuts that should work on every screen."""
+             try:
+                  with self.app_state.lock:
+                     y_pressed = bool(self.app_state.controller.btn_Y)
+
+                    # Trigger only on the press edge, not every poll tick while held
+                  if y_pressed and not self._prev_y_pressed:
+                     self.trigger_emergency_stop()
+
+                  self._prev_y_pressed = y_pressed
+                  self.after(50, self._poll_global_inputs)
+
+             except Exception:
+                  pass
+    def trigger_emergency_stop(self):
+         """Global emergency stop used by widget and Y button."""
+         enqueue_state(self.app_state, State.DISABLED)
+         with self.app_state.lock:
+                self.app_state.joystick_active = False
+                self.app_state.e_stop_active = True #added this bad boy for the y e stop button
+         if not isinstance(self._current_frame, MainMenuScreen):
+             self.show_frame(MainMenuScreen)
 
     def _draw_battery(self, canvas: tk.Canvas, percent: float):
         """Fill the canvas to visually represent battery percentage."""
