@@ -3305,9 +3305,11 @@ class HomeSettingsScreen(BaseScreen):
             cy = PAD + (1 - (y - min_y) / span_y) * (H - 2 * PAD)
             return cx, cy
 
-        # Draw boundary polygon
+        # Draw boundary polygon — order must be TL, TR, BR, BL (clockwise)
+        # corners list is [TL, TR, BL, BR], so reorder to [0, 1, 3, 2]
+        ordered = [corners[0], corners[1], corners[3], corners[2]] if len(corners) == 4 else corners
         pts = []
-        for c in corners:
+        for c in ordered:
             pts.extend(to_canvas(c["x"], c["y"]))
         self._canvas.create_polygon(pts, outline=C_SECONDARY, fill="", width=2)
 
