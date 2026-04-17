@@ -21,7 +21,7 @@
 # ============================================================
 DEBUG_OVERLAY      = False    # Show semi-transparent TX log overlay on screen
 REQUIRE_CONNECTION = False   # True = halt on missing XBee; False = UI-only mode
-STARTUP            = True    # True = show START button (debug bypass); False = lock on startup until ping_ack
+STARTUP            = False    # True = show START button (debug bypass); False = lock on startup until ping_ack
 KFX_SPEED          = 0.5     # Global KFX run speed (0.0–1.0); sent to Pi via kfx_speed packet
 # ============================================================
 
@@ -556,6 +556,10 @@ class SerialRXThread(threading.Thread):
             elif packet.type == "kfx_speed_ack":
                 self.app_state.event_queue.put({"type": "kfx_speed_ack"})
 
+            elif packet.type == "ping":
+                # Pi's watchdog is checking we're alive — reply immediately
+                enqueue_packet(self.app_state, "ping_ack")
+
             elif packet.type == "ping_ack":
                 ack = PingAckData.model_validate_json(packet.json_data)
                 with self.app_state.lock:
@@ -581,6 +585,20 @@ class SerialRXThread(threading.Thread):
                 self.app_state.event_queue.put({
                     "type": "record_home_check_result",
                     "ok": result.ok,
+                })
+
+            elif packet.type == "error":
+                data = json.loads(packet.json_data)
+                self.app_state.event_queue.put({
+                    "type": "error",
+                    "errstr": data.get("errstr", "Unknown error"),
+                })
+
+            elif packet.type == "route_finished":
+                data = json.loads(packet.json_data)
+                self.app_state.event_queue.put({
+                    "type": "route_finished",
+                    "message": data.get("message", "Route complete"),
                 })
 
         except Exception as e:
@@ -983,9 +1001,22 @@ class StartupScreen(BaseScreen):
                 font=("Arial Black", 32),
                 text_color=C_MUTED,
             )
-            self._status_label.pack(pady=(0, 100))
+            self._status_label.pack(pady=(0, 20))
+
+            self._exit_btn = ctk.CTkButton(
+                center,
+                text="EXIT",
+                width=200, height=60,
+                font=("Arial Black", 24),
+                fg_color=C_DANGER,
+                hover_color="#991a00",
+                command=self.app.quit,
+            )
+            self._exit_btn_id: str | None = None
+
             self._dot_count = 0
             self._start_ping_loop()
+            self._exit_btn_id = self.after(5000, self._show_exit_button)
 
     def _start_ping_loop(self):
         """Begin sending ping packets every PING_INTERVAL_MS ms."""
@@ -1048,8 +1079,15 @@ class StartupScreen(BaseScreen):
         except Exception:
             pass
 
+    def _show_exit_button(self):
+        try:
+            if self.winfo_exists():
+                self._exit_btn.pack(pady=(20, 80))
+        except Exception:
+            pass
+
     def _cancel_timers(self):
-        for attr in ("_ping_id", "_poll_id"):
+        for attr in ("_ping_id", "_poll_id", "_exit_btn_id"):
             id_ = getattr(self, attr, None)
             if id_ is not None:
                 try:
@@ -1253,6 +1291,19 @@ class FreeDriveScreen(BaseScreen):
         self._status_lbl.configure(text="Fetching position...", text_color=C_MUTED)
         with self.state.lock:
             self.state.joystick_active = False
+
+        # Drop stale position samples so the next pos_data is from this request.
+        unmatched = []
+        while not self.state.event_queue.empty():
+            try:
+                event = self.state.event_queue.get_nowait()
+            except Exception:
+                break
+            if event.get("type") != "pos_data":
+                unmatched.append(event)
+        for e in unmatched:
+            self.state.event_queue.put(e)
+
         enqueue_packet(self.state, "request_pos")
         self._timeout_remaining = ACK_TIMEOUT_MS // 200
         self._poll_id = self.after(200, self._poll_set_home)
@@ -1278,8 +1329,8 @@ class FreeDriveScreen(BaseScreen):
                     break
                 etype = event.get("type")
                 if self._set_home_stage == "req_pos" and etype == "pos_data":
+                    # Keep the newest pos_data if multiple are queued.
                     found = event
-                    break
                 elif self._set_home_stage == "set_home" and etype == "home_ack":
                     found = event
                     break
@@ -1552,7 +1603,28 @@ class RecordRouteScreen(BaseScreen):
             )
 
         self._error_detail_lbl.configure(text=detail)
-        self._error_detail_lbl.pack(pady=(0, 20))
+        self._error_detail_lbl.pack(pady=(0, 6))
+
+        # Fetch and display current position (non-timeout failures only)
+        if not timed_out and home:
+            self._cur_pos_lbl.configure(text="Current:  fetching...", text_color=C_MUTED)
+            self._cur_pos_lbl.pack(pady=(0, 14))
+            # Drop stale position samples so the next pos_data is from this request.
+            unmatched = []
+            while not self.state.event_queue.empty():
+                try:
+                    event = self.state.event_queue.get_nowait()
+                except Exception:
+                    break
+                if event.get("type") != "pos_data":
+                    unmatched.append(event)
+            for e in unmatched:
+                self.state.event_queue.put(e)
+            enqueue_packet(self.state, "request_pos")
+            self._pos_timeout_remaining = 10  # 10 × 200 ms = 2 s
+            self._pos_poll_id = self.after(200, self._poll_cur_pos)
+        else:
+            self._cur_pos_lbl.pack_forget()
 
         # Swap finish/cancel for a single back-to-menu button
         self._cancel_btn.pack_forget()
@@ -2259,7 +2331,23 @@ class RunRouteScreen(BaseScreen):
             else:
                 detail = "No home position set.\nGo to Settings → Bot Settings → Home Settings."
             self._check_overlay_lbl.configure(text="NOT AT HOME POSITION")
-            self._check_detail_lbl.configure(text=detail)
+            self._check_detail_lbl.configure(text=home_line)
+            # Request current position from Pi so we can display it
+            self._check_cur_pos_lbl.configure(text="Current:  fetching...", text_color=C_MUTED)
+            # Drop stale position samples so the next pos_data is from this request.
+            unmatched = []
+            while not self.state.event_queue.empty():
+                try:
+                    event = self.state.event_queue.get_nowait()
+                except Exception:
+                    break
+                if event.get("type") != "pos_data":
+                    unmatched.append(event)
+            for e in unmatched:
+                self.state.event_queue.put(e)
+            enqueue_packet(self.state, "request_pos")
+            self._pos_timeout_remaining = 10  # 10 × 200 ms = 2 s
+            self._pos_poll_id = self.after(200, self._poll_cur_pos)
         self._show_backdrop()
         self._check_overlay.place(relx=0.5, rely=0.5, anchor="center")
         self._check_overlay.lift()
@@ -2903,9 +2991,6 @@ class HomeSettingsScreen(BaseScreen):
     On any ack timeout → inline error label shown under the action buttons.
     """
 
-    _CANVAS_W = 420
-    _CANVAS_H = 360
-
     def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
 
@@ -2936,10 +3021,10 @@ class HomeSettingsScreen(BaseScreen):
 
         self._canvas = tk.Canvas(
             left,
-            width=self._CANVAS_W, height=self._CANVAS_H,
             bg="#1a1a1a", highlightthickness=0,
         )
-        self._canvas.pack(padx=12, pady=8)
+        self._canvas.pack(fill="both", expand=True, padx=12, pady=8)
+        self._canvas.bind("<Configure>", lambda _: self._draw_map())
 
         # ── Right: controls ───────────────────────────────────────────────
         right = ctk.CTkFrame(body, fg_color="transparent", width=420)
@@ -3051,7 +3136,10 @@ class HomeSettingsScreen(BaseScreen):
     def _draw_map(self):
         """Draw the arena boundary and home position diamond."""
         self._canvas.delete("all")
-        W, H = self._CANVAS_W, self._CANVAS_H
+        W = self._canvas.winfo_width()
+        H = self._canvas.winfo_height()
+        if W <= 1 or H <= 1:
+            return  # Not yet laid out
         PAD = 32
 
         if not self._boundary or not self._boundary.get("corners"):
@@ -3076,9 +3164,11 @@ class HomeSettingsScreen(BaseScreen):
             cy = PAD + (1 - (y - min_y) / span_y) * (H - 2 * PAD)
             return cx, cy
 
-        # Draw boundary polygon
+        # Draw boundary polygon — order must be TL, TR, BR, BL (clockwise)
+        # corners list is [TL, TR, BL, BR], so reorder to [0, 1, 3, 2]
+        ordered = [corners[0], corners[1], corners[3], corners[2]] if len(corners) == 4 else corners
         pts = []
-        for c in corners:
+        for c in ordered:
             pts.extend(to_canvas(c["x"], c["y"]))
         self._canvas.create_polygon(pts, outline=C_SECONDARY, fill="", width=2)
 
@@ -3898,6 +3988,89 @@ class OnScreenKeyboard:
 
 
 # ============================================================
+# PERSISTENT RIBBON WIDGETS
+# Full-width banners placed on the root window via place() so they
+# survive frame swaps.  Each has an ✕ button to dismiss.
+# ============================================================
+
+class ErrorRibbonWidget:
+    """
+    Red full-width ribbon shown whenever the Pi sends a type="error" packet.
+    Dismissed by pressing the ✕ button on the right side.
+    Lives on the root window so it persists across screen transitions.
+    """
+    _HEIGHT = 52
+
+    def __init__(self, root: ctk.CTk):
+        self._frame = ctk.CTkFrame(root, fg_color=C_DANGER, corner_radius=0,
+                                    height=self._HEIGHT)
+        self._lbl = ctk.CTkLabel(
+            self._frame, text="",
+            font=("Arial Bold", 16), text_color=C_TEXT,
+            anchor="w",
+        )
+        self._lbl.pack(side="left", fill="x", expand=True, padx=(16, 8), pady=8)
+
+        ctk.CTkButton(
+            self._frame, text="✕",
+            font=("Arial Bold", 18), width=44, height=36,
+            fg_color="#991a00", hover_color="#660d00",
+            text_color=C_TEXT, corner_radius=8,
+            command=self.hide,
+        ).pack(side="right", padx=(0, 10), pady=8)
+
+    def show(self, message: str):
+        self._lbl.configure(text=f"ERROR: {message}")
+        self._frame.place(x=0, y=50, anchor="nw", relwidth=1.0)
+        self._frame.lift()
+
+    def hide(self):
+        self._frame.place_forget()
+
+    def lift(self):
+        self._frame.lift()
+
+
+class RouteFinishedRibbonWidget:
+    """
+    Green full-width ribbon shown when the Pi signals a route or
+    return-to-home has completed (type="route_finished").
+    Dismissed by pressing the ✕ button on the right side.
+    Lives on the root window so it persists across screen transitions.
+    """
+    _HEIGHT = 52
+
+    def __init__(self, root: ctk.CTk):
+        self._frame = ctk.CTkFrame(root, fg_color=C_SUCCESS, corner_radius=0,
+                                    height=self._HEIGHT)
+        self._lbl = ctk.CTkLabel(
+            self._frame, text="",
+            font=("Arial Bold", 16), text_color=C_TEXT,
+            anchor="w",
+        )
+        self._lbl.pack(side="left", fill="x", expand=True, padx=(16, 8), pady=8)
+
+        ctk.CTkButton(
+            self._frame, text="✕",
+            font=("Arial Bold", 18), width=44, height=36,
+            fg_color="#145214", hover_color="#0d3a0d",
+            text_color=C_TEXT, corner_radius=8,
+            command=self.hide,
+        ).pack(side="right", padx=(0, 10), pady=8)
+
+    def show(self, message: str):
+        self._lbl.configure(text=message)
+        self._frame.place(x=0, y=50, anchor="nw", relwidth=1.0)
+        self._frame.lift()
+
+    def hide(self):
+        self._frame.place_forget()
+
+    def lift(self):
+        self._frame.lift()
+
+
+# ============================================================
 # E-STOP OVERLAY WIDGET
 # Persistent bottom-left button that lives on the root window
 # via place() so it survives frame swaps.
@@ -4103,11 +4276,19 @@ class BullseyeApp(ctk.CTk):
         # ── E-Stop overlay (persistent bottom-left button) ────────────────
         self._estop = EStopWidget(self, self, app_state)
 
+        # ── Persistent ribbon overlays ────────────────────────────────────
+        self._error_ribbon = ErrorRibbonWidget(self)
+        self._route_ribbon = RouteFinishedRibbonWidget(self)
+
         # ── Navigate to startup screen ────────────────────────────────────
         self.show_frame(StartupScreen)
 
         # ── Global event polling (path_created etc.) ──────────────────────
         self._poll_global_events()
+
+        # ── TEMP: show ribbons immediately for visual testing ─────────────
+        #self.after(2000, lambda: self._error_ribbon.show("Motor controller timeout"))
+        #self.after(10000, lambda: self._route_ribbon.show("Route complete"))
 
         # ── Handle window close button ────────────────────────────────────
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -4220,6 +4401,8 @@ class BullseyeApp(ctk.CTk):
         if self._overlay:
             self._overlay.lift()
         self._estop.lift()
+        self._error_ribbon.lift()
+        self._route_ribbon.lift()
 
     def toggle_debug_overlay(self, enabled: bool):
         """Show or hide the debug TX-log overlay."""
@@ -4256,6 +4439,11 @@ class BullseyeApp(ctk.CTk):
                     if isinstance(self._current_frame, RecordRouteScreen):
                         self.app_state.event_queue.put(event)
                     # else: stale — discard
+                elif event.get("type") == "error":
+                    self._error_ribbon.show(event.get("errstr", "Unknown error"))
+                elif event.get("type") == "route_finished":
+                    msg = event.get("message", "Route complete")
+                    self._route_ribbon.show(msg)
                 else:
                     # All other events belong to screen-level pollers; put back
                     self.app_state.event_queue.put(event)
