@@ -3248,7 +3248,8 @@ class HomeSettingsScreen(BaseScreen):
             width = self._CANVAS_W, height = self._CANVAS_H,
             bg="#1a1a1a", highlightthickness=0,
         )
-        self._canvas.pack(padx=12, pady=8)
+        #self._canvas.pack(padx=12, pady=8)
+        self._canvas.pack(fill="both", expand=True, padx=12, pady=8)
         self._canvas.bind("<Configure>", lambda _: self._draw_map())
 
         # ── Right: controls ───────────────────────────────────────────────
