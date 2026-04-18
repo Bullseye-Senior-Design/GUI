@@ -21,7 +21,7 @@
 # ============================================================
 DEBUG_OVERLAY      = False    # Show semi-transparent TX log overlay on screen
 REQUIRE_CONNECTION = False   # True = halt on missing XBee; False = UI-only mode
-STARTUP            = False    # True = show START button (debug bypass); False = lock on startup until ping_ack CHANGE THIS BACK BEFORE
+STARTUP            = True    # True = show START button (debug bypass); False = lock on startup until ping_ack CHANGE THIS BACK BEFORE
 KFX_SPEED          = 0.5     # Global KFX run speed (0.0–1.0); sent to Pi via kfx_speed packet
 # ============================================================
 
@@ -3249,7 +3249,7 @@ class HomeSettingsScreen(BaseScreen):
             bg="#1a1a1a", highlightthickness=0,
         )
         self._canvas.pack(padx=12, pady=8)
-        #self._canvas.bind("<Configure>", lambda _: self._draw_map())
+        self._canvas.bind("<Configure>", lambda _: self._draw_map())
 
         # ── Right: controls ───────────────────────────────────────────────
         right = ctk.CTkFrame(body, fg_color="transparent", width=320)
