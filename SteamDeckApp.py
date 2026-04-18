@@ -21,7 +21,7 @@
 # ============================================================
 DEBUG_OVERLAY      = False    # Show semi-transparent TX log overlay on screen
 REQUIRE_CONNECTION = False   # True = halt on missing XBee; False = UI-only mode
-STARTUP            = False    # True = show START button (debug bypass); False = lock on startup until ping_ack
+STARTUP            = True    # True = show START button (debug bypass); False = lock on startup until ping_ack CHANGE THIS BACK BEFORE
 KFX_SPEED          = 0.5     # Global KFX run speed (0.0–1.0); sent to Pi via kfx_speed packet
 # ============================================================
 
@@ -83,6 +83,15 @@ ROUTES_FILE     = Path(__file__).parent / "routes.json"
 KFX_CONFIG_FILE = Path(__file__).parent / "kfx_config.json"
 BOUNDARY_FILE   = Path(__file__).parent / "boundary.json"
 HOME_FILE       = Path(__file__).parent / "home.json"
+
+UI_SCALE = 1.6   # tweak this (1.3 – 2.0)
+
+BASE_FONT = int(16 * UI_SCALE)
+LARGE_FONT = int(24 * UI_SCALE)
+TITLE_FONT = int(36 * UI_SCALE)
+
+ENTRY_WIDTH = int(180 * UI_SCALE)
+ENTRY_HEIGHT = int(40 * UI_SCALE)
 
 # ============================================================
 # DELTA ENCODING  –  mirrors ControllerMessager.py exactly
@@ -3003,11 +3012,11 @@ class BoundarySettingsScreen(BaseScreen):
 
         # ── Title ─────────────────────────────────────────────────────────
         ctk.CTkLabel(self, text="BOUNDARY SETTINGS",
-                     font=("Arial Bold", 30),
+                     font=("Arial Bold", 40),
                      text_color=C_TEXT).pack(pady=(28, 4))
         ctk.CTkLabel(self,
                      text="Enter the X and Y coordinates of each arena corner.",
-                     font=("Arial", 16), text_color=C_MUTED).pack(pady=(0, 16))
+                     font=("Arial", 24), text_color=C_MUTED).pack(pady=(0, 16))
 
         # ── Corner entry grid ─────────────────────────────────────────────
         grid = ctk.CTkFrame(self, fg_color="transparent")
@@ -3026,25 +3035,30 @@ class BoundarySettingsScreen(BaseScreen):
             row = (i // 2) * 3   # 3 rows per corner pair: label, x, y
 
             ctk.CTkLabel(grid, text=label,
-                         font=("Arial Bold", 18), text_color=C_TEXT,
+                         font=("Arial Bold", 24), text_color=C_TEXT,
                          justify="center").grid(row=row, column=col, padx=40, pady=(12, 4))
 
             x_frame = ctk.CTkFrame(grid, fg_color="transparent")
             x_frame.grid(row=row + 1, column=col, padx=40, pady=2)
-            ctk.CTkLabel(x_frame, text="X:", font=("Arial", 16),
+            ctk.CTkLabel(x_frame, text="X:", font=("Arial", 28),
                          text_color=C_MUTED, width=24).pack(side="left")
-            x_entry = ctk.CTkEntry(x_frame, width=140, font=("Arial", 16),
-                                    fg_color=C_SURFACE, text_color=C_TEXT,
-                                    border_color=C_SECONDARY)
+            #x_entry = ctk.CTkEntry(x_frame, width=140, font=("Arial", 16),
+            #                        fg_color=C_SURFACE, text_color=C_TEXT,
+            #                        border_color=C_SECONDARY)
+            
+            x_entry = ctk.CTkEntry(x_frame, width=ENTRY_WIDTH, height=ENTRY_HEIGHT,font=("Arial", BASE_FONT),
+                                   fg_color=C_SURFACE,text_color=C_TEXT,border_color=C_SECONDARY)
             x_entry.pack(side="left")
 
             y_frame = ctk.CTkFrame(grid, fg_color="transparent")
             y_frame.grid(row=row + 2, column=col, padx=40, pady=(2, 8))
-            ctk.CTkLabel(y_frame, text="Y:", font=("Arial", 16),
+            ctk.CTkLabel(y_frame, text="Y:", font=("Arial", 28),
                          text_color=C_MUTED, width=24).pack(side="left")
-            y_entry = ctk.CTkEntry(y_frame, width=140, font=("Arial", 16),
-                                    fg_color=C_SURFACE, text_color=C_TEXT,
-                                    border_color=C_SECONDARY)
+            #y_entry = ctk.CTkEntry(y_frame, width=140, font=("Arial", 16),
+            #                        fg_color=C_SURFACE, text_color=C_TEXT,
+            #                        border_color=C_SECONDARY)
+            y_entry = ctk.CTkEntry(y_frame,width=ENTRY_WIDTH, height=ENTRY_HEIGHT,font=("Arial",BASE_FONT),
+                                   fg_color=C_SURFACE,text_color=C_TEXT,border_color=C_SECONDARY)
             y_entry.pack(side="left")
 
             # Pre-populate from existing boundary
@@ -3198,6 +3212,8 @@ class HomeSettingsScreen(BaseScreen):
 
     On any ack timeout → inline error label shown under the action buttons.
     """
+    _CANVAS_W = 420
+    _CANVAS_H = 360
 
     def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
@@ -3229,10 +3245,11 @@ class HomeSettingsScreen(BaseScreen):
 
         self._canvas = tk.Canvas(
             left,
+            width = self._CANVAS_W, height = self._CANVAS_H,
             bg="#1a1a1a", highlightthickness=0,
         )
-        self._canvas.pack(fill="both", expand=True, padx=12, pady=8)
-        self._canvas.bind("<Configure>", lambda _: self._draw_map())
+        self._canvas.pack(padx=12, pady=8)
+        #self._canvas.bind("<Configure>", lambda _: self._draw_map())
 
         # ── Right: controls ───────────────────────────────────────────────
         right = ctk.CTkFrame(body, fg_color="transparent", width=320)
@@ -3240,18 +3257,43 @@ class HomeSettingsScreen(BaseScreen):
         right.pack_propagate(False)
 
         ctk.CTkLabel(right, text="HOME POSITION",
-                     font=("Arial Bold", 20), text_color=C_TEXT).pack(pady=(8, 16))
+                     font=("Arial Bold", 40), text_color=C_TEXT).pack(pady=(8, 16))
 
         # X / Y / Yaw entry fields
+        #for label, attr in [("X", "_x_entry"), ("Y", "_y_entry"), ("Yaw (°)", "_yaw_entry")]:
+        #    row = ctk.CTkFrame(right, fg_color="transparent")
+        #    row.pack(fill="x", pady=4)
+        #    ctk.CTkLabel(row, text=label, font=("Arial Bold", 16),
+        #                text_color=C_MUTED, width=70).pack(side="left", padx=(0, 8))
+        #    entry = ctk.CTkEntry(row, width=180, font=("Arial", 16),
+        #                          fg_color=C_SURFACE, text_color=C_TEXT,
+        #                          border_color=C_SECONDARY)
+        #    entry.pack(side="left")
+        #    setattr(self, attr, entry)
+
         for label, attr in [("X", "_x_entry"), ("Y", "_y_entry"), ("Yaw (°)", "_yaw_entry")]:
-            row = ctk.CTkFrame(right, fg_color="transparent")
-            row.pack(fill="x", pady=4)
-            ctk.CTkLabel(row, text=label, font=("Arial Bold", 16),
-                         text_color=C_MUTED, width=70).pack(side="left", padx=(0, 8))
-            entry = ctk.CTkEntry(row, width=180, font=("Arial", 16),
-                                  fg_color=C_SURFACE, text_color=C_TEXT,
-                                  border_color=C_SECONDARY)
-            entry.pack(side="left")
+            field = ctk.CTkFrame(right, fg_color="transparent")
+            field.pack(fill="x", pady=4)
+
+            ctk.CTkLabel(
+             field,
+            text=label,
+            font=("Arial Bold", 20),
+            text_color=C_MUTED,
+            justify="left"
+            ).pack(anchor="w", pady=(0, 6))
+
+            entry = ctk.CTkEntry(
+                field,
+                width=260,
+                height=70,
+                font=("Arial", 22),
+                fg_color=C_SURFACE,
+                text_color=C_TEXT,
+                border_color=C_SECONDARY
+            )
+            entry.pack(fill="x")
+
             setattr(self, attr, entry)
 
         # Pre-fill from home.json
@@ -3276,7 +3318,7 @@ class HomeSettingsScreen(BaseScreen):
             font=("Arial", 26, "bold"),
             fg_color=C_SECONDARY, hover_color=C_TERTIARY,
             text_color=C_BG, corner_radius=20,
-            width=260, height=62,
+            width=260, height=70,
         )
         self._update_btn.pack(pady=(16, 8))
 
@@ -4325,11 +4367,14 @@ class EStopWidget:
         self._btn.lift()
 
     def _on_press(self):
-        enqueue_state(self._state, State.DISABLED)
-        with self._state.lock:
-            self._state.joystick_active = False
-            self._state.e_stop_active = True
-        self._app.show_frame(MainMenuScreen)
+        self._app.trigger_emergency_stop()
+
+    #def _on_press(self):
+    #    enqueue_state(self._state, State.DISABLED)
+    #    with self._state.lock:
+    #        self._state.joystick_active = False
+    #        self._state.e_stop_active = True
+    #    self._app.show_frame(MainMenuScreen)
 
 
 # ============================================================
@@ -4356,6 +4401,7 @@ class BullseyeApp(ctk.CTk):
         super().__init__()
 
         self.app_state = app_state
+        self._prev_y_pressed = False
         self._joystick_thread = joystick_thread
         self._tx_thread = tx_thread
         self._rx_thread = rx_thread
@@ -4488,12 +4534,41 @@ class BullseyeApp(ctk.CTk):
         # ── Global event polling (path_created etc.) ──────────────────────
         self._poll_global_events()
 
+        self.after(50, self._poll_global_inputs)
+
         # ── TEMP: show ribbons immediately for visual testing ─────────────
         #self.after(2000, lambda: self._error_ribbon.show("Motor controller timeout"))
         #self.after(10000, lambda: self._route_ribbon.show("Route complete"))
 
         # ── Handle window close button ────────────────────────────────────
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def trigger_emergency_stop(self):
+        """Global emergency stop used by widget and Steam Deck Y button."""
+        enqueue_state(self.app_state, State.DISABLED)
+        with self.app_state.lock:
+            self.app_state.joystick_active = False
+            self.app_state.e_stop_active = True
+
+        if not isinstance(self._current_frame, MainMenuScreen):
+            self.show_frame(MainMenuScreen)
+
+
+    def _poll_global_inputs(self):
+        """Catch global controller shortcuts that should work on every screen."""
+        try:
+            with self.app_state.lock:
+                y_pressed = bool(self.app_state.controller.btn_Y)
+
+        # edge detect so it only fires once per press
+            if y_pressed and not self._prev_y_pressed:
+                self.trigger_emergency_stop()
+
+            self._prev_y_pressed = y_pressed
+            self.after(50, self._poll_global_inputs)
+
+        except Exception:
+            pass
 
 
     def _draw_battery(self, canvas: tk.Canvas, percent: float):
