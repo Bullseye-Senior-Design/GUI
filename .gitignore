@@ -7,6 +7,11 @@ logs/
 sim_log/
 references/
 
+# Local robot configuration (device-specific, not shared)
+home.json
+boundary.json
+routes.json
+
 # C extensions
 *.so
 
