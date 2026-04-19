@@ -1,3 +1,5 @@
 customtkinter
 pygame-ce
-Pillow          # Required by customtkinter for image handling
+Pillow     
+pyserial     # Required by customtkinter for image handling
+pydantic
