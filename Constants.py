@@ -1,6 +1,6 @@
 class Constants:
     # Controller input handling
-    controller_deadzone = 0.15
+    controller_deadzone = 0.05
     controller_update_rate = 0.05 
 
     # Serial communication settings

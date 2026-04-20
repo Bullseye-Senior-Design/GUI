@@ -23,6 +23,7 @@ DEBUG_OVERLAY      = False    # Show semi-transparent TX log overlay on screen
 REQUIRE_CONNECTION = False   # True = halt on missing XBee; False = UI-only mode
 STARTUP            = True    # True = show START button (debug bypass); False = lock on startup until ping_ack CHANGE THIS BACK BEFORE
 KFX_SPEED          = 0.5     # Global KFX run speed (0.0–1.0); sent to Pi via kfx_speed packet
+RUN_SPEED          = 50      # Global run-route speed (10–100 %); persisted across sessions
 # ============================================================
 
 import customtkinter as ctk
@@ -81,6 +82,7 @@ C_SUCCESS   = "#1a7a1a"   # Green       – set home, positive/confirm actions
 # ── Local storage file paths ──────────────────────────────────────────────────
 ROUTES_FILE     = Path(__file__).parent / "routes.json"
 KFX_CONFIG_FILE = Path(__file__).parent / "kfx_config.json"
+SETTINGS_FILE   = Path(__file__).parent / "app_settings.json"
 BOUNDARY_FILE   = Path(__file__).parent / "boundary.json"
 HOME_FILE       = Path(__file__).parent / "home.json"
 
@@ -184,6 +186,28 @@ def save_kfx_config(config: dict):
             json.dump(config, f, indent=2)
     except Exception as e:
         print(f"[STORAGE] Could not save kfx_config.json: {e}")
+
+
+def load_settings():
+    """Load persisted user settings (deadzone, run speed) from app_settings.json."""
+    global DEADZONE, RUN_SPEED
+    if SETTINGS_FILE.exists():
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                data = json.load(f)
+            DEADZONE  = float(data.get("deadzone",  DEADZONE))
+            RUN_SPEED = int(data.get("run_speed",   RUN_SPEED))
+        except Exception as e:
+            print(f"[STORAGE] Could not load app_settings.json: {e}")
+
+
+def save_settings():
+    """Persist current deadzone and run route speed to app_settings.json."""
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump({"deadzone": DEADZONE, "run_speed": RUN_SPEED}, f)
+    except Exception as e:
+        print(f"[STORAGE] Could not save app_settings.json: {e}")
 
 
 def load_boundary() -> dict | None:
@@ -2014,7 +2038,7 @@ class RunRouteScreen(BaseScreen):
                      font=("Arial Bold", 20),
                      text_color=C_TEXT).pack(pady=(24, 4))
 
-        self._speed_label = ctk.CTkLabel(controls, text="50%",
+        self._speed_label = ctk.CTkLabel(controls, text=f"{RUN_SPEED}%",
                                           font=("Arial Bold", 38),
                                           text_color=C_TERTIARY)
         self._speed_label.pack()
@@ -2025,7 +2049,7 @@ class RunRouteScreen(BaseScreen):
             progress_color=C_SECONDARY,
             command=self._on_speed_change,
         )
-        self._speed_slider.set(50)
+        self._speed_slider.set(RUN_SPEED)
         self._speed_slider.pack(pady=(4, 24))
 
         # Status label shown during home check
@@ -2411,7 +2435,9 @@ class RunRouteScreen(BaseScreen):
 
     def _on_speed_change(self, value):
         """Update the speed label as the slider moves. Value is 10–100 (int steps)."""
-        self._speed_label.configure(text=f"{int(value)}%")
+        global RUN_SPEED
+        RUN_SPEED = int(value)
+        self._speed_label.configure(text=f"{RUN_SPEED}%")
 
     # ── RUN flow ──────────────────────────────────────────────────────────
 
@@ -4714,6 +4740,7 @@ class BullseyeApp(ctk.CTk):
           3. Stop all threads, quit pygame, destroy window
         """
         print("[APP] Shutting down – sending DISABLED to robot...")
+        save_settings()
         enqueue_state(self.app_state, State.DISABLED)
         with self.app_state.lock:
             self.app_state.joystick_active = False
@@ -4731,6 +4758,9 @@ class BullseyeApp(ctk.CTk):
 # ============================================================
 
 def main():
+    # ── Load persisted user settings ──────────────────────────────────────
+    load_settings()
+
     # ── Shared state ──────────────────────────────────────────────────────
     app_state = AppState()
 
