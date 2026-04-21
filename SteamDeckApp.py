@@ -21,7 +21,7 @@
 # ============================================================
 DEBUG_OVERLAY      = False    # Show semi-transparent TX log overlay on screen
 REQUIRE_CONNECTION = True   # True = halt on missing XBee; False = UI-only mode
-STARTUP            = True    # True = show START button (debug bypass); False = lock on startup until ping_ack CHANGE THIS BACK BEFORE
+STARTUP            = False    # True = show START button (debug bypass); False = lock on startup until ping_ack CHANGE THIS BACK BEFORE
 KFX_SPEED          = 0.5     # Global KFX run speed (0.0–1.0); sent to Pi via kfx_speed packet
 RUN_SPEED          = 50      # Global run-route speed (10–100 %); persisted across sessions
 # ============================================================
@@ -382,6 +382,12 @@ class AppState:
         # bypassed and the user can proceed directly from the startup screen.
         self.connected: bool = False
 
+        # ── Live serial handle (swapped on reconnect) ─────────────────────
+        # None in UI-only mode (REQUIRE_CONNECTION=False + no XBee at launch).
+        # RX/TX threads read this each cycle so a reconnected port takes effect
+        # without restarting threads.
+        self.ser: "serial.Serial | None" = None
+
         # ── E-Stop state ──────────────────────────────────────────────────
         # Set True when the E-STOP overlay button is pressed.
         # Cleared when the user selects DRIVE or PATH MENU from MainMenuScreen.
@@ -504,9 +510,10 @@ class SerialTXThread(threading.Thread):
         but the log entry is always written so the overlay stays useful.
         """
         line = packet.model_dump_json() + "\n"
-        if self.ser and self.ser.is_open:
+        ser = self.app_state.ser
+        if ser and ser.is_open:
             try:
-                self.ser.write(line.encode())
+                ser.write(line.encode())
             except serial.SerialException as e:
                 print(f"[TX ERROR] Serial write failed: {e}")
 
@@ -558,23 +565,29 @@ class SerialRXThread(threading.Thread):
 
     On serial error: prints a warning and exits the receive loop.
     """
-    def __init__(self, app_state: AppState, ser: serial.Serial | None):
+    def __init__(self, app_state: AppState):
         super().__init__(daemon=True, name="SerialRXThread")
         self.app_state = app_state
-        self.ser = ser
         self._running = True
 
     def run(self):
-        if self.ser is None:
-            return   # No serial in UI-only mode – nothing to receive
+        # If no serial at startup: UI-only mode exits immediately;
+        # REQUIRE_CONNECTION mode waits for the port to appear.
+        if self.app_state.ser is None:
+            if not REQUIRE_CONNECTION:
+                return
+            self.app_state.event_queue.put({"type": "serial_disconnected"})
+            if not self._try_reconnect():
+                return
 
         buffer = ""
         while self._running:
+            ser = self.app_state.ser
             try:
-                if self.ser.in_waiting == 0:
+                if ser.in_waiting == 0:
                     time.sleep(0.02)
                     continue
-                chunk = self.ser.read(self.ser.in_waiting).decode(errors="ignore")
+                chunk = ser.read(ser.in_waiting).decode(errors="ignore")
                 buffer += chunk
 
                 while "\n" in buffer:
@@ -585,10 +598,28 @@ class SerialRXThread(threading.Thread):
 
             except serial.SerialException as e:
                 print(f"[RX ERROR] Serial lost: {e}")
-                break
+                buffer = ""
+                self.app_state.event_queue.put({"type": "serial_disconnected"})
+                if not self._try_reconnect():
+                    return
             except Exception as e:
                 print(f"[RX ERROR] Unexpected: {e}")
                 time.sleep(0.1)
+
+    def _try_reconnect(self) -> bool:
+        """Poll every 2 s until serial reopens or thread is stopped. Returns True on success."""
+        while self._running:
+            time.sleep(2.0)
+            try:
+                new_ser = serial.Serial(PORT, BAUD, timeout=1)
+                time.sleep(0.5)   # Let XBee initialise
+                self.app_state.ser = new_ser
+                self.app_state.event_queue.put({"type": "serial_reconnected"})
+                print("[RX] XBee reconnected.")
+                return True
+            except serial.SerialException:
+                pass
+        return False
 
     def _process(self, line: str):
         """Parse one line and update shared state or push a GUI event."""
@@ -1026,6 +1057,7 @@ class StartupScreen(BaseScreen):
 
         self._ping_id: str | None = None   # after() id for ping loop
         self._poll_id: str | None = None   # after() id for event poll
+        self._xbee_missing: bool = False   # True while serial_disconnected is active
         self.bind("<Destroy>", self._on_destroy)
 
         # Center everything vertically and horizontally
@@ -1097,15 +1129,16 @@ class StartupScreen(BaseScreen):
         except Exception:
             return
         enqueue_packet(self.state, "ping")
-        # Animate dots so the user knows it's alive
-        self._dot_count = (self._dot_count + 1) % 4
-        dots = "." * self._dot_count
-        try:
-            self._status_label.configure(
-                text=f"CONNECTING TO BULLSEYE{dots}"
-            )
-        except Exception:
-            pass
+        # Animate dots only when XBee is present; don't overwrite error message
+        if not self._xbee_missing:
+            self._dot_count = (self._dot_count + 1) % 4
+            dots = "." * self._dot_count
+            try:
+                self._status_label.configure(
+                    text=f"CONNECTING TO BULLSEYE{dots}"
+                )
+            except Exception:
+                pass
         try:
             self._ping_id = self.after(PING_INTERVAL_MS, self._send_ping)
         except Exception:
@@ -1121,18 +1154,50 @@ class StartupScreen(BaseScreen):
         try:
             unmatched = []
             found = None
+            disconnected = False
+            reconnected = False
             while not self.state.event_queue.empty():
                 try:
                     event = self.state.event_queue.get_nowait()
                 except Exception:
                     break
-                if event.get("type") == "ping_ack":
+                etype = event.get("type")
+                if etype == "ping_ack":
                     found = event
                     break
+                elif etype == "serial_disconnected":
+                    disconnected = True
+                elif etype == "serial_reconnected":
+                    reconnected = True
                 else:
                     unmatched.append(event)
             for e in unmatched:
                 self.state.event_queue.put(e)
+
+            if disconnected:
+                self._xbee_missing = True
+                try:
+                    self._status_label.configure(
+                        text="XBee not detected — Check connection",
+                        text_color=C_DANGER,
+                    )
+                    # Show exit button immediately instead of waiting 5 s
+                    if self._exit_btn_id is not None:
+                        self.after_cancel(self._exit_btn_id)
+                        self._exit_btn_id = None
+                    self._exit_btn.pack(pady=(20, 80))
+                except Exception:
+                    pass
+
+            if reconnected:
+                self._xbee_missing = False
+                try:
+                    self._status_label.configure(
+                        text="CONNECTING TO BULLSEYE...",
+                        text_color=C_MUTED,
+                    )
+                except Exception:
+                    pass
 
             if found is not None:
                 self._cancel_timers()
@@ -4405,6 +4470,70 @@ class EStopWidget:
 
 
 # ============================================================
+# XBEE DISCONNECT OVERLAY
+# Full-window modal shown when XBee drops mid-operation.
+# Dismissed automatically when the port reconnects.
+# ============================================================
+
+class XBeeDisconnectOverlay:
+    """
+    Covers the entire root window with a dark backdrop and a centred card
+    telling the user their XBee disconnected.  Auto-dismisses when the
+    SerialRXThread pushes a serial_reconnected event.
+    """
+
+    def __init__(self, root: ctk.CTk, app):
+        self._app = app
+        self._visible = False
+
+        # Semi-transparent dark backdrop
+        self._backdrop = ctk.CTkFrame(root, fg_color="#000000", corner_radius=0)
+
+        # Centred info card
+        self._card = ctk.CTkFrame(root, fg_color=C_SURFACE, corner_radius=16,
+                                   width=520, height=320)
+        self._card.pack_propagate(False)
+
+        ctk.CTkLabel(
+            self._card,
+            text="XBee Disconnected",
+            font=("Arial Black", 30),
+            text_color=C_DANGER,
+        ).pack(pady=(44, 12))
+
+        ctk.CTkLabel(
+            self._card,
+            text="Check the XBee connection.\nReconnecting automatically…",
+            font=("Arial", 20),
+            text_color=C_TEXT,
+            justify="center",
+        ).pack(pady=(0, 36))
+
+        ctk.CTkButton(
+            self._card,
+            text="CLOSE APP",
+            font=("Arial Bold", 20),
+            fg_color=C_DANGER, hover_color="#991a00",
+            width=210, height=58,
+            command=app._on_close,
+        ).pack()
+
+    def show(self):
+        if not self._visible:
+            self._visible = True
+            self._backdrop.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+            self._card.place(relx=0.5, rely=0.5, anchor="center")
+            self._backdrop.lift()
+            self._card.lift()
+
+    def hide(self):
+        if self._visible:
+            self._visible = False
+            self._backdrop.place_forget()
+            self._card.place_forget()
+
+
+# ============================================================
 # ROOT APPLICATION WINDOW
 # ============================================================
 
@@ -4554,6 +4683,7 @@ class BullseyeApp(ctk.CTk):
         # ── Persistent ribbon overlays ────────────────────────────────────
         self._error_ribbon = ErrorRibbonWidget(self)
         self._route_ribbon = RouteFinishedRibbonWidget(self)
+        self._xbee_overlay = XBeeDisconnectOverlay(self, self)
 
         # ── Navigate to startup screen ────────────────────────────────────
         self.show_frame(StartupScreen)
@@ -4725,6 +4855,15 @@ class BullseyeApp(ctk.CTk):
                 elif event.get("type") == "route_finished":
                     msg = event.get("message", "Route complete")
                     self._route_ribbon.show(msg)
+                elif event.get("type") == "serial_disconnected":
+                    if isinstance(self._current_frame, StartupScreen):
+                        self.app_state.event_queue.put(event)  # StartupScreen handles it
+                    else:
+                        self._xbee_overlay.show()
+                elif event.get("type") == "serial_reconnected":
+                    self._xbee_overlay.hide()
+                    if isinstance(self._current_frame, StartupScreen):
+                        self.app_state.event_queue.put(event)  # StartupScreen handles it
                 else:
                     # All other events belong to screen-level pollers; put back
                     self.app_state.event_queue.put(event)
@@ -4766,23 +4905,24 @@ def main():
 
     # ── Serial connection ─────────────────────────────────────────────────
     ser = None
+    ser = None
     try:
         ser = serial.Serial(PORT, BAUD, timeout=1)
         time.sleep(2)   # Allow XBee to initialize
         print(f"[OK] Connected to XBee on {PORT} at {BAUD} baud")
     except serial.SerialException:
         if REQUIRE_CONNECTION:
-            print(f"[ERROR] Could not open {PORT}. "
-                  f"Check XBee connection and try again.")
-            sys.exit(1)
+            print(f"[WARN] No XBee on {PORT} – GUI will prompt user to reconnect.")
         else:
             print(f"[WARN] No serial on {PORT} – running in UI-only mode. "
                   f"Set REQUIRE_CONNECTION=True to enforce hardware presence.")
 
+    app_state.ser = ser   # Shared handle; RX thread swaps this on reconnect
+
     # ── Background threads ────────────────────────────────────────────────
     joystick_thread = JoystickThread(app_state)
     tx_thread       = SerialTXThread(app_state, ser)
-    rx_thread       = SerialRXThread(app_state, ser)
+    rx_thread       = SerialRXThread(app_state)
 
     joystick_thread.start()
     tx_thread.start()
@@ -4793,8 +4933,9 @@ def main():
     app.mainloop()
 
     # ── Post-mainloop cleanup ─────────────────────────────────────────────
-    if ser and ser.is_open:
-        ser.close()
+    final_ser = app_state.ser
+    if final_ser and final_ser.is_open:
+        final_ser.close()
     print("[APP] Exited cleanly.")
 
 
