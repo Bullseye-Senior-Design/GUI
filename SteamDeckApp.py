@@ -4523,6 +4523,12 @@ class XBeeDisconnectOverlay:
             self._visible = True
             self._backdrop.place(x=0, y=0, relwidth=1.0, relheight=1.0)
             self._card.place(relx=0.5, rely=0.5, anchor="center")
+        self._backdrop.lift()
+        self._card.lift()
+
+    def lift(self):
+        """Re-raise above any newly packed content frame."""
+        if self._visible:
             self._backdrop.lift()
             self._card.lift()
 
@@ -4814,6 +4820,7 @@ class BullseyeApp(ctk.CTk):
         self._estop.lift()
         self._error_ribbon.lift()
         self._route_ribbon.lift()
+        self._xbee_overlay.lift()
 
     def toggle_debug_overlay(self, enabled: bool):
         """Show or hide the debug TX-log overlay."""
@@ -4836,40 +4843,43 @@ class BullseyeApp(ctk.CTk):
 
         All other events are put back for the active screen to consume.
         """
-        try:
-            # Snapshot the queue depth so we don't loop on events we just
-            # re-queued (which would cause an infinite loop this tick).
-            depth = self.app_state.event_queue.qsize()
-            for _ in range(depth):
-                try:
-                    event = self.app_state.event_queue.get_nowait()
-                except Exception:
-                    break
-                if event.get("type") == "path_created":
+        # Snapshot the queue depth so we don't loop on events we just
+        # re-queued (which would cause an infinite loop this tick).
+        depth = self.app_state.event_queue.qsize()
+        for _ in range(depth):
+            try:
+                event = self.app_state.event_queue.get_nowait()
+            except Exception:
+                break
+            try:
+                etype = event.get("type")
+                if etype == "path_created":
                     # Only keep if RecordRouteScreen is still waiting for it
                     if isinstance(self._current_frame, RecordRouteScreen):
                         self.app_state.event_queue.put(event)
                     # else: stale — discard
-                elif event.get("type") == "error":
+                elif etype == "error":
                     self._error_ribbon.show(event.get("errstr", "Unknown error"))
-                elif event.get("type") == "route_finished":
+                elif etype == "route_finished":
                     msg = event.get("message", "Route complete")
                     self._route_ribbon.show(msg)
-                elif event.get("type") == "serial_disconnected":
+                    if isinstance(self._current_frame, RunRouteScreen) and self._current_frame._is_running:
+                        self._current_frame._stop()
+                elif etype == "serial_disconnected":
                     if isinstance(self._current_frame, StartupScreen):
                         self.app_state.event_queue.put(event)  # StartupScreen handles it
                     else:
                         self._xbee_overlay.show()
-                elif event.get("type") == "serial_reconnected":
+                elif etype == "serial_reconnected":
                     self._xbee_overlay.hide()
                     if isinstance(self._current_frame, StartupScreen):
                         self.app_state.event_queue.put(event)  # StartupScreen handles it
                 else:
                     # All other events belong to screen-level pollers; put back
                     self.app_state.event_queue.put(event)
-        except Exception:
-            pass
-        self.after(500, self._poll_global_events)
+            except Exception as e:
+                print(f"[GLOBAL POLL] Error handling event {event}: {e}")
+        self.after(100, self._poll_global_events)
 
     def _on_close(self):
         """
