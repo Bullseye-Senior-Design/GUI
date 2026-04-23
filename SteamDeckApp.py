@@ -23,7 +23,9 @@ DEBUG_OVERLAY      = False    # Show semi-transparent TX log overlay on screen
 REQUIRE_CONNECTION = True   # True = halt on missing XBee; False = UI-only mode
 STARTUP            = False    # True = show START button (debug bypass); False = lock on startup until ping_ack CHANGE THIS BACK BEFORE
 KFX_SPEED          = 0.5     # Global KFX run speed (0.0–1.0); sent to Pi via kfx_speed packet
+BULLSEYE_MAX_SPEED = 0.5     # Global Bullseye max drive speed (0.0–1.0); resets to 50% on every startup
 RUN_SPEED          = 50      # Global run-route speed (10–100 %); persisted across sessions
+PACKET_SAVE        = True    # True = driving delta only sends ly+rx; False = sends all controller fields
 # ============================================================
 
 import customtkinter as ctk
@@ -110,14 +112,20 @@ _FIELD_MAP = {
 _FLOAT_FIELDS = {'left_x', 'left_y', 'right_x', 'right_y', 'btn_R2', 'btn_L2'}
 
 
+_PACKET_SAVE_FIELDS = {'left_y', 'right_x'}
+
+
 def _build_delta(current: ControllerData, previous: ControllerData | None) -> dict:
     """
     Return only the fields that changed since the last packet, using short keys.
     If previous is None (first packet ever) all fields are included.
     Floats are rounded to 2 dp to avoid sending floating-point noise.
+    When PACKET_SAVE is True, only ly and rx are ever included.
     """
+    active_map = {f: k for f, k in _FIELD_MAP.items()
+                  if not PACKET_SAVE or f in _PACKET_SAVE_FIELDS}
     delta = {}
-    for field, short_key in _FIELD_MAP.items():
+    for field, short_key in active_map.items():
         curr_val = getattr(current, field)
         if field in _FLOAT_FIELDS:
             curr_val = round(curr_val, 2)
@@ -652,6 +660,9 @@ class SerialRXThread(threading.Thread):
 
             elif packet.type == "kfx_speed_ack":
                 self.app_state.event_queue.put({"type": "kfx_speed_ack"})
+
+            elif packet.type == "bullseye_speed_ack":
+                self.app_state.event_queue.put({"type": "bullseye_speed_ack"})
 
             elif packet.type == "ping":
                 # Pi's watchdog is checking we're alive — reply immediately
@@ -1330,6 +1341,38 @@ class FreeDriveScreen(BaseScreen):
         self._set_home_stage: str = "idle"   # idle | confirm | req_pos | set_home
         self._pending_pos: dict | None = None
         self.bind("<Destroy>", self._on_destroy)
+
+        # ── Left joystick icon (top-left corner) ──────────────────────────
+        left_col = ctk.CTkFrame(self, fg_color="transparent")
+        left_col.place(x=50, y=70)
+        lj = tk.Canvas(left_col, width=200, height=215, bg=C_BG, highlightthickness=0)
+        lj.pack()
+        # up arrow — head then shaft connecting to circle top
+        lj.create_polygon(74, 26, 100, 0, 126, 26, fill=C_TEXT, outline="")
+        lj.create_rectangle(91, 26, 109, 28, fill=C_TEXT, outline="")
+        lj.create_oval(20, 28, 180, 188, outline=C_TERTIARY, width=4)
+        lj.create_text(100, 108, text="L", font=("Arial Black", 44), fill=C_TERTIARY)
+        # down arrow — shaft from circle bottom then head
+        lj.create_rectangle(91, 188, 109, 190, fill=C_TEXT, outline="")
+        lj.create_polygon(74, 190, 100, 215, 126, 190, fill=C_TEXT, outline="")
+        ctk.CTkLabel(left_col, text="FORWARD / BACK",
+                     font=("Arial", 16), text_color=C_MUTED).pack(pady=(4, 0))
+
+        # ── Right joystick icon (top-right corner) ────────────────────────
+        right_col = ctk.CTkFrame(self, fg_color="transparent")
+        right_col.place(x=1050, y=70)
+        rj = tk.Canvas(right_col, width=240, height=215, bg=C_BG, highlightthickness=0)
+        rj.pack()
+        # left arrow — head then shaft connecting to circle left edge
+        rj.create_polygon(26, 82, 0, 108, 26, 134, fill=C_TEXT, outline="")
+        rj.create_rectangle(26, 100, 28, 116, fill=C_TEXT, outline="")
+        rj.create_oval(28, 28, 212, 188, outline=C_TERTIARY, width=4)
+        rj.create_text(120, 108, text="R", font=("Arial Black", 44), fill=C_TERTIARY)
+        # right arrow — shaft from circle right edge then head
+        rj.create_rectangle(212, 100, 214, 116, fill=C_TEXT, outline="")
+        rj.create_polygon(214, 82, 238, 108, 214, 134, fill=C_TEXT, outline="")
+        ctk.CTkLabel(right_col, text="TURN",
+                     font=("Arial", 16), text_color=C_MUTED).pack(pady=(4, 0))
 
         # ── Center instruction text ───────────────────────────────────────
         center = ctk.CTkFrame(self, fg_color="transparent")
@@ -2767,10 +2810,10 @@ class SettingsSubMenuScreen(BaseScreen):
                      font=("Arial Bold", 30),
                      text_color=C_TEXT).pack(pady=(0, 50))
 
-        make_nav_button(center, "CONTROLLER SETTINGS",
+        make_nav_button(center, "BULLSEYE SETTINGS",
                         command=lambda: self.show(ControllerSettingsScreen)).pack(pady=14)
 
-        make_nav_button(center, "BOT SETTINGS",
+        make_nav_button(center, "POSITION SETTINGS",
                         command=lambda: self.show(BotSettingsScreen)).pack(pady=14)
 
         make_nav_button(center, "KFX SETTINGS",
@@ -2782,33 +2825,37 @@ class SettingsSubMenuScreen(BaseScreen):
 
 
 # ============================================================
-# SCREEN 9: CONTROLLER SETTINGS
+# SCREEN 9: BULLSEYE SETTINGS
 # ============================================================
 
 class ControllerSettingsScreen(BaseScreen):
     """
-    Controller and robot settings:
+    Bullseye and controller settings:
 
     Deadzone    – live global read by JoystickThread on every axis-read cycle
     Request Battery        – sends 'request_battery'; Pi replies with a 'battery'
                              packet; screen shows voltage, current, SOC, time remaining
     KFX Speed              – slider 10-100 %; SEND sends 'kfx_speed' packet;
                              Pi replies with 'kfx_speed_ack'; updates KFX_SPEED global
+    Bullseye Max Speed     – slider 10-100 %; SEND sends 'bullseye_speed' packet;
+                             Pi replies with 'bullseye_speed_ack'; updates BULLSEYE_MAX_SPEED global
     """
     def __init__(self, parent, app, app_state: AppState):
         super().__init__(parent, app, app_state)
 
         self._poll_id: str | None = None
-        self._poll_stage: str = "idle"   # idle | battery | kfx_speed
+        self._poll_stage: str = "idle"   # idle | battery | kfx_speed | bullseye_speed
         self._timeout_remaining: int = 0
+        self._prev_kfx_speed: float = KFX_SPEED
+        self._prev_bullseye_speed: float = BULLSEYE_MAX_SPEED
         self.bind("<Destroy>", self._on_destroy)
 
         card = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16,
-                            width=720, height=600)
+                            width=720, height=760)
         card.place(relx=0.5, rely=0.5, anchor="center")
         card.pack_propagate(False)
 
-        ctk.CTkLabel(card, text="CONTROLLER SETTINGS",
+        ctk.CTkLabel(card, text="BULLSEYE SETTINGS",
                      font=("Arial Bold", 28),
                      text_color=C_TEXT).pack(pady=(28, 16))
 
@@ -2882,6 +2929,34 @@ class ControllerSettingsScreen(BaseScreen):
         )
         self._kfx_send_btn.pack()
 
+        # ── Divider ───────────────────────────────────────────────────────
+        ctk.CTkFrame(card, fg_color=C_PRIMARY, height=2, width=560).pack(pady=(16, 12))
+
+        # ── Bullseye Max Speed ────────────────────────────────────────────
+        ctk.CTkLabel(card, text="BULLSEYE MAX SPEED",
+                     font=("Arial Bold", 17), text_color=C_TEXT).pack(pady=(0, 4))
+
+        self._bullseye_speed_label = ctk.CTkLabel(
+            card, text=f"{int(BULLSEYE_MAX_SPEED * 100)}%",
+            font=("Arial Bold", 30), text_color=C_TERTIARY,
+        )
+        self._bullseye_speed_label.pack()
+
+        self._bullseye_speed_slider = ctk.CTkSlider(
+            card, from_=10, to=100, number_of_steps=9,
+            width=220, button_color=C_TERTIARY, progress_color=C_SECONDARY,
+            command=self._bullseye_speed_changed,
+        )
+        self._bullseye_speed_slider.set(int(BULLSEYE_MAX_SPEED * 100))
+        self._bullseye_speed_slider.pack(pady=(0, 8))
+
+        self._bullseye_send_btn = make_nav_button(
+            card, "SEND",
+            command=self._send_bullseye_speed,
+            color=C_SECONDARY, width=180, height=55,
+        )
+        self._bullseye_send_btn.pack()
+
         # Shared status label
         self._status_lbl = ctk.CTkLabel(
             card, text="",
@@ -2946,11 +3021,30 @@ class ControllerSettingsScreen(BaseScreen):
         if self._poll_stage != "idle":
             return
         global KFX_SPEED
+        self._prev_kfx_speed = KFX_SPEED
         KFX_SPEED = self._kfx_speed_slider.get() / 100.0
         self._poll_stage = "kfx_speed"
         self._kfx_send_btn.configure(state="disabled", text="SENDING...")
         self._status_lbl.configure(text="Sending KFX speed...", text_color=C_MUTED)
         enqueue_packet(self.state, "kfx_speed", json.dumps({"speed": KFX_SPEED}))
+        self._timeout_remaining = ACK_TIMEOUT_MS // 200
+        self._start_poll()
+
+    # ── Bullseye Max Speed ─────────────────────────────────────────────────
+
+    def _bullseye_speed_changed(self, value):
+        self._bullseye_speed_label.configure(text=f"{int(value)}%")
+
+    def _send_bullseye_speed(self):
+        if self._poll_stage != "idle":
+            return
+        global BULLSEYE_MAX_SPEED
+        self._prev_bullseye_speed = BULLSEYE_MAX_SPEED
+        BULLSEYE_MAX_SPEED = self._bullseye_speed_slider.get() / 100.0
+        self._poll_stage = "bullseye_speed"
+        self._bullseye_send_btn.configure(state="disabled", text="SENDING...")
+        self._status_lbl.configure(text="Sending Bullseye max speed...", text_color=C_MUTED)
+        enqueue_packet(self.state, "bullseye_speed", json.dumps({"speed": BULLSEYE_MAX_SPEED}))
         self._timeout_remaining = ACK_TIMEOUT_MS // 200
         self._start_poll()
 
@@ -2990,6 +3084,9 @@ class ControllerSettingsScreen(BaseScreen):
                 elif self._poll_stage == "kfx_speed" and etype == "kfx_speed_ack":
                     found = event
                     break
+                elif self._poll_stage == "bullseye_speed" and etype == "bullseye_speed_ack":
+                    found = event
+                    break
                 else:
                     unmatched.append(event)
             for e in unmatched:
@@ -3018,6 +3115,12 @@ class ControllerSettingsScreen(BaseScreen):
                         text=f"KFX speed set to {int(KFX_SPEED * 100)}%.",
                         text_color=C_SUCCESS,
                     )
+                elif self._poll_stage == "bullseye_speed":
+                    self._bullseye_send_btn.configure(state="normal", text="SEND")
+                    self._status_lbl.configure(
+                        text=f"Bullseye max speed set to {int(BULLSEYE_MAX_SPEED * 100)}%.",
+                        text_color=C_SUCCESS,
+                    )
                 self._poll_stage = "idle"
                 self.after(4000, lambda: self._status_lbl.configure(text=""))
                 return
@@ -3029,7 +3132,17 @@ class ControllerSettingsScreen(BaseScreen):
             if self._poll_stage == "battery":
                 self._batt_btn.configure(state="normal", text="REQUEST")
             elif self._poll_stage == "kfx_speed":
+                global KFX_SPEED
+                KFX_SPEED = self._prev_kfx_speed
+                self._kfx_speed_slider.set(int(self._prev_kfx_speed * 100))
+                self._kfx_speed_label.configure(text=f"{int(self._prev_kfx_speed * 100)}%")
                 self._kfx_send_btn.configure(state="normal", text="SEND")
+            elif self._poll_stage == "bullseye_speed":
+                global BULLSEYE_MAX_SPEED
+                BULLSEYE_MAX_SPEED = self._prev_bullseye_speed
+                self._bullseye_speed_slider.set(int(self._prev_bullseye_speed * 100))
+                self._bullseye_speed_label.configure(text=f"{int(self._prev_bullseye_speed * 100)}%")
+                self._bullseye_send_btn.configure(state="normal", text="SEND")
             self._status_lbl.configure(
                 text="No response from Bullseye. Try again.",
                 text_color=C_DANGER,
@@ -3051,7 +3164,7 @@ class ControllerSettingsScreen(BaseScreen):
 
 
 # ============================================================
-# SCREEN 10: BOT SETTINGS
+# SCREEN 10: POSITION SETTINGS
 # ============================================================
 
 class BotSettingsScreen(BaseScreen):
@@ -3065,7 +3178,7 @@ class BotSettingsScreen(BaseScreen):
         center = ctk.CTkFrame(self, fg_color="transparent")
         center.place(relx=0.5, rely=0.5, anchor="center")
 
-        ctk.CTkLabel(center, text="BOT SETTINGS",
+        ctk.CTkLabel(center, text="POSITION SETTINGS",
                      font=("Arial Bold", 30),
                      text_color=C_TEXT).pack(pady=(0, 50))
 
