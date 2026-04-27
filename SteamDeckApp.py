@@ -592,14 +592,14 @@ class SerialRXThread(threading.Thread):
         while self._running:
             ser = self.app_state.ser
             try:
-                # Use blocking read (timeout=1s) so a USB removal raises
-                # SerialException reliably on Linux.  in_waiting silently
-                # returns 0 on SteamOS when the dongle is unplugged, which
-                # would leave us looping forever without detecting the drop.
-                chunk = ser.read(256)
-                if not chunk:
+                # On Linux (SteamOS), in_waiting raises OSError (not
+                # SerialException) when the USB dongle is removed, so both
+                # must be caught below to detect disconnect reliably.
+                if ser.in_waiting == 0:
+                    time.sleep(0.02)
                     continue
-                buffer += chunk.decode(errors="ignore")
+                chunk = ser.read(ser.in_waiting).decode(errors="ignore")
+                buffer += chunk
 
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
@@ -607,7 +607,7 @@ class SerialRXThread(threading.Thread):
                     if line:
                         self._process(line)
 
-            except serial.SerialException as e:
+            except (serial.SerialException, OSError) as e:
                 print(f"[RX ERROR] Serial lost: {e}")
                 buffer = ""
                 self.app_state.event_queue.put({"type": "serial_disconnected"})
@@ -619,6 +619,13 @@ class SerialRXThread(threading.Thread):
 
     def _try_reconnect(self) -> bool:
         """Poll every 2 s until serial reopens or thread is stopped. Returns True on success."""
+        old_ser = self.app_state.ser
+        self.app_state.ser = None
+        if old_ser is not None:
+            try:
+                old_ser.close()
+            except Exception:
+                pass
         while self._running:
             time.sleep(2.0)
             try:
@@ -4648,7 +4655,6 @@ class XBeeDisconnectOverlay:
     def __init__(self, root: ctk.CTk, app):
         self._app = app
         self._visible = False
-        self._poll_id = None
 
         # Semi-transparent dark backdrop
         self._backdrop = ctk.CTkFrame(root, fg_color="#000000", corner_radius=0)
@@ -4687,7 +4693,6 @@ class XBeeDisconnectOverlay:
             self._visible = True
             self._backdrop.place(x=0, y=0, relwidth=1.0, relheight=1.0)
             self._card.place(relx=0.5, rely=0.5, anchor="center")
-            self._start_reconnect_poll()
         self._backdrop.lift()
         self._card.lift()
 
@@ -4702,26 +4707,6 @@ class XBeeDisconnectOverlay:
             self._visible = False
             self._backdrop.place_forget()
             self._card.place_forget()
-        if self._poll_id is not None:
-            try:
-                self._card.after_cancel(self._poll_id)
-            except Exception:
-                pass
-            self._poll_id = None
-
-    def _start_reconnect_poll(self):
-        self._poll_id = self._card.after(500, self._poll_reconnect)
-
-    def _poll_reconnect(self):
-        self._poll_id = None
-        if not self._visible:
-            return
-        ser = self._app.app_state.ser
-        if ser and ser.is_open:
-            self._app.app_state.event_queue.put({"type": "serial_reconnected"})
-            self.hide()
-            return
-        self._poll_id = self._card.after(500, self._poll_reconnect)
 
 
 # ============================================================
