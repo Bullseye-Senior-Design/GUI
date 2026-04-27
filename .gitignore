@@ -11,6 +11,7 @@ references/
 home.json
 boundary.json
 routes.json
+assets/boot_count.txt
 
 # C extensions
 *.so

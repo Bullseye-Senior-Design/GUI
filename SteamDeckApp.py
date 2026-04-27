@@ -1045,6 +1045,20 @@ class BaseScreen(ctk.CTkFrame):
         self.app.show_frame(screen_class, **kwargs)
 
 
+def _load_and_bump_boot_count() -> int:
+    """Read, increment, and persist the boot counter. Returns the new count."""
+    path = Path("assets/boot_count.txt")
+    try:
+        count = int(path.read_text().strip()) + 1
+    except Exception:
+        count = 1
+    try:
+        path.write_text(str(count))
+    except Exception:
+        pass
+    return count
+
+
 # ============================================================
 # SCREEN 1: STARTUP
 # ============================================================
@@ -1076,8 +1090,10 @@ class StartupScreen(BaseScreen):
         center.place(relx=0.5, rely=0.5, anchor="center")
 
         # ── Logo ──────────────────────────────────────────────────────────
+        _boot = _load_and_bump_boot_count()
+        _logo_file = "assets/Stern.jpg" if _boot % 100 == 0 else "assets/logo.png"
         self.logo_image = ctk.CTkImage(
-            Image.open("assets/logo.png"),
+            Image.open(_logo_file),
             size=(800, 500)
         )
         ctk.CTkLabel(center, image=self.logo_image, text="").pack()
@@ -3062,6 +3078,7 @@ class ControllerSettingsScreen(BaseScreen):
             pass
 
     def _poll_events(self):
+        global KFX_SPEED, BULLSEYE_MAX_SPEED
         self._poll_id = None
         try:
             if not self.winfo_exists():
@@ -3132,13 +3149,11 @@ class ControllerSettingsScreen(BaseScreen):
             if self._poll_stage == "battery":
                 self._batt_btn.configure(state="normal", text="REQUEST")
             elif self._poll_stage == "kfx_speed":
-                global KFX_SPEED
                 KFX_SPEED = self._prev_kfx_speed
                 self._kfx_speed_slider.set(int(self._prev_kfx_speed * 100))
                 self._kfx_speed_label.configure(text=f"{int(self._prev_kfx_speed * 100)}%")
                 self._kfx_send_btn.configure(state="normal", text="SEND")
             elif self._poll_stage == "bullseye_speed":
-                global BULLSEYE_MAX_SPEED
                 BULLSEYE_MAX_SPEED = self._prev_bullseye_speed
                 self._bullseye_speed_slider.set(int(self._prev_bullseye_speed * 100))
                 self._bullseye_speed_label.configure(text=f"{int(self._prev_bullseye_speed * 100)}%")
