@@ -20,8 +20,8 @@
 # TOGGLE FLAGS
 # ============================================================
 DEBUG_OVERLAY      = False    # Show semi-transparent TX log overlay on screen
-REQUIRE_CONNECTION = True   # True = halt on missing XBee; False = UI-only mode
-STARTUP            = False    # True = show START button (debug bypass); False = lock on startup until ping_ack CHANGE THIS BACK BEFORE
+REQUIRE_CONNECTION = False   # True = halt on missing XBee; False = UI-only mode
+STARTUP            = True    # True = show START button (debug bypass); False = lock on startup until ping_ack CHANGE THIS BACK BEFORE
 KFX_SPEED          = 0.5     # Global KFX run speed (0.0–1.0); sent to Pi via kfx_speed packet
 BULLSEYE_MAX_SPEED = 0.5     # Global Bullseye max drive speed (0.0–1.0); resets to 50% on every startup
 RUN_SPEED          = 50      # Global run-route speed (10–100 %); persisted across sessions
@@ -1675,6 +1675,38 @@ class RecordRouteScreen(BaseScreen):
         self._check_timeout_remaining: int = ACK_TIMEOUT_MS // 200
         self.bind("<Destroy>", self._on_destroy)
 
+                # ── Left joystick icon (top-left corner) ──────────────────────────
+        left_col = ctk.CTkFrame(self, fg_color="transparent")
+        left_col.place(x=50, y=70)
+        lj = tk.Canvas(left_col, width=200, height=215, bg=C_BG, highlightthickness=0)
+        lj.pack()
+        # up arrow — head then shaft connecting to circle top
+        lj.create_polygon(74, 26, 100, 0, 126, 26, fill=C_TEXT, outline="")
+        lj.create_rectangle(91, 26, 109, 28, fill=C_TEXT, outline="")
+        lj.create_oval(20, 28, 180, 188, outline=C_TERTIARY, width=4)
+        lj.create_text(100, 108, text="L", font=("Arial Black", 44), fill=C_TERTIARY)
+        # down arrow — shaft from circle bottom then head
+        lj.create_rectangle(91, 188, 109, 190, fill=C_TEXT, outline="")
+        lj.create_polygon(74, 190, 100, 215, 126, 190, fill=C_TEXT, outline="")
+        ctk.CTkLabel(left_col, text="FORWARD / BACK",
+                     font=("Arial", 16), text_color=C_MUTED).pack(pady=(4, 0))
+
+        # ── Right joystick icon (top-right corner) ────────────────────────
+        right_col = ctk.CTkFrame(self, fg_color="transparent")
+        right_col.place(x=1000, y=70)
+        rj = tk.Canvas(right_col, width=240, height=215, bg=C_BG, highlightthickness=0)
+        rj.pack()
+        # left arrow — head then shaft connecting to circle left edge
+        rj.create_polygon(26, 82, 0, 108, 26, 134, fill=C_TEXT, outline="")
+        rj.create_rectangle(26, 100, 28, 116, fill=C_TEXT, outline="")
+        rj.create_oval(28, 28, 212, 188, outline=C_TERTIARY, width=4)
+        rj.create_text(120, 108, text="R", font=("Arial Black", 44), fill=C_TERTIARY)
+        # right arrow — shaft from circle right edge then head
+        rj.create_rectangle(212, 100, 214, 116, fill=C_TEXT, outline="")
+        rj.create_polygon(214, 82, 238, 108, 214, 134, fill=C_TEXT, outline="")
+        ctk.CTkLabel(right_col, text="TURN",
+                     font=("Arial", 16), text_color=C_MUTED).pack(pady=(4, 0))
+        
         # ── Center content ────────────────────────────────────────────────
         self._center = ctk.CTkFrame(self, fg_color="transparent")
         self._center.place(relx=0.5, rely=0.5, anchor="center")
@@ -4616,6 +4648,7 @@ class XBeeDisconnectOverlay:
     def __init__(self, root: ctk.CTk, app):
         self._app = app
         self._visible = False
+        self._poll_id = None
 
         # Semi-transparent dark backdrop
         self._backdrop = ctk.CTkFrame(root, fg_color="#000000", corner_radius=0)
@@ -4654,6 +4687,7 @@ class XBeeDisconnectOverlay:
             self._visible = True
             self._backdrop.place(x=0, y=0, relwidth=1.0, relheight=1.0)
             self._card.place(relx=0.5, rely=0.5, anchor="center")
+            self._start_reconnect_poll()
         self._backdrop.lift()
         self._card.lift()
 
@@ -4668,6 +4702,26 @@ class XBeeDisconnectOverlay:
             self._visible = False
             self._backdrop.place_forget()
             self._card.place_forget()
+        if self._poll_id is not None:
+            try:
+                self._card.after_cancel(self._poll_id)
+            except Exception:
+                pass
+            self._poll_id = None
+
+    def _start_reconnect_poll(self):
+        self._poll_id = self._card.after(500, self._poll_reconnect)
+
+    def _poll_reconnect(self):
+        self._poll_id = None
+        if not self._visible:
+            return
+        ser = self._app.app_state.ser
+        if ser and ser.is_open:
+            self._app.app_state.event_queue.put({"type": "serial_reconnected"})
+            self.hide()
+            return
+        self._poll_id = self._card.after(500, self._poll_reconnect)
 
 
 # ============================================================
