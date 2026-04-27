@@ -592,11 +592,14 @@ class SerialRXThread(threading.Thread):
         while self._running:
             ser = self.app_state.ser
             try:
-                if ser.in_waiting == 0:
-                    time.sleep(0.02)
+                # Use blocking read (timeout=1s) so a USB removal raises
+                # SerialException reliably on Linux.  in_waiting silently
+                # returns 0 on SteamOS when the dongle is unplugged, which
+                # would leave us looping forever without detecting the drop.
+                chunk = ser.read(256)
+                if not chunk:
                     continue
-                chunk = ser.read(ser.in_waiting).decode(errors="ignore")
-                buffer += chunk
+                buffer += chunk.decode(errors="ignore")
 
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
@@ -1376,7 +1379,7 @@ class FreeDriveScreen(BaseScreen):
 
         # ── Right joystick icon (top-right corner) ────────────────────────
         right_col = ctk.CTkFrame(self, fg_color="transparent")
-        right_col.place(x=1050, y=70)
+        right_col.place(x=1000, y=70)
         rj = tk.Canvas(right_col, width=240, height=215, bg=C_BG, highlightthickness=0)
         rj.pack()
         # left arrow — head then shaft connecting to circle left edge
