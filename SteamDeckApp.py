@@ -20,8 +20,8 @@
 # TOGGLE FLAGS
 # ============================================================
 DEBUG_OVERLAY      = False    # Show semi-transparent TX log overlay on screen
-REQUIRE_CONNECTION = False   # True = halt on missing XBee; False = UI-only mode
-STARTUP            = True    # True = show START button (debug bypass); False = lock on startup until ping_ack CHANGE THIS BACK BEFORE
+REQUIRE_CONNECTION = True   # True = halt on missing XBee; False = UI-only mode
+STARTUP            = False    # True = show START button (debug bypass); False = lock on startup until ping_ack CHANGE THIS BACK BEFORE
 KFX_SPEED          = 0.5     # Global KFX run speed (0.0–1.0); sent to Pi via kfx_speed packet
 BULLSEYE_MAX_SPEED = 0.5     # Global Bullseye max drive speed (0.0–1.0); resets to 50% on every startup
 RUN_SPEED          = 50      # Global run-route speed (10–100 %); persisted across sessions
