@@ -2926,7 +2926,7 @@ class ControllerSettingsScreen(BaseScreen):
         self.bind("<Destroy>", self._on_destroy)
 
         card = ctk.CTkFrame(self, fg_color=C_SURFACE, corner_radius=16,
-                            width=720, height=580)
+                            width=760, height=660)
         card.place(relx=0.5, rely=0.5, anchor="center")
         card.pack_propagate(False)
 
@@ -2949,28 +2949,28 @@ class ControllerSettingsScreen(BaseScreen):
         dz_slider.pack(pady=(0, 16))
 
         # ── Divider ───────────────────────────────────────────────────────
-        ctk.CTkFrame(card, fg_color=C_PRIMARY, height=2, width=560).pack(pady=(0, 16))
+        ctk.CTkFrame(card, fg_color=C_PRIMARY, height=2, width=600).pack(pady=(0, 20))
 
         # ── Two-column lower section ──────────────────────────────────────
         lower = ctk.CTkFrame(card, fg_color="transparent")
-        lower.pack(fill="x", padx=32)
+        lower.pack(fill="x", padx=40)
 
         # Left: Request Battery
         left = ctk.CTkFrame(lower, fg_color="transparent")
         left.pack(side="left", expand=True, fill="both", padx=(0, 16))
 
         ctk.CTkLabel(left, text="ROBOT BATTERY",
-                     font=("Arial Bold", 17), text_color=C_TEXT).pack(pady=(0, 8))
+                     font=("Arial Bold", 17), text_color=C_TEXT).pack(pady=(0, 10))
 
         batt_display_container = ctk.CTkFrame(left, fg_color="transparent",
-                                               width=240, height=96)
-        batt_display_container.pack(pady=(0, 10))
+                                               width=260, height=100)
+        batt_display_container.pack(pady=(0, 12))
         batt_display_container.pack_propagate(False)
 
         self._batt_display = ctk.CTkLabel(
             batt_display_container, text="--",
             font=("Arial Bold", 15), text_color=C_MUTED,
-            justify="left", wraplength=240,
+            justify="left", wraplength=260,
         )
         self._batt_display.place(relx=0.0, rely=0.5, anchor="w")
 
@@ -3014,10 +3014,10 @@ class ControllerSettingsScreen(BaseScreen):
             card, text="",
             font=("Arial", 15), text_color=C_MUTED,
         )
-        self._status_lbl.pack(pady=(14, 0))
+        self._status_lbl.pack(pady=(18, 0))
 
         # ── Debug Overlay toggle ──────────────────────────────────────────
-        ctk.CTkFrame(card, fg_color=C_PRIMARY, height=2, width=560).pack(pady=(14, 8))
+        ctk.CTkFrame(card, fg_color=C_PRIMARY, height=2, width=600).pack(pady=(18, 10))
 
         debug_row = ctk.CTkFrame(card, fg_color="transparent")
         debug_row.pack()
