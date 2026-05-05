@@ -2962,12 +2962,17 @@ class ControllerSettingsScreen(BaseScreen):
         ctk.CTkLabel(left, text="ROBOT BATTERY",
                      font=("Arial Bold", 17), text_color=C_TEXT).pack(pady=(0, 8))
 
+        batt_display_container = ctk.CTkFrame(left, fg_color="transparent",
+                                               width=240, height=96)
+        batt_display_container.pack(pady=(0, 10))
+        batt_display_container.pack_propagate(False)
+
         self._batt_display = ctk.CTkLabel(
-            left, text="--",
+            batt_display_container, text="--",
             font=("Arial Bold", 15), text_color=C_MUTED,
             justify="left", wraplength=240,
         )
-        self._batt_display.pack(pady=(0, 10))
+        self._batt_display.place(relx=0.0, rely=0.5, anchor="w")
 
         self._batt_btn = make_nav_button(
             left, "REQUEST",
