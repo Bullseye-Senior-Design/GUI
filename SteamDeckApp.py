@@ -26,7 +26,7 @@ KFX_SPEED          = 0.5     # Global KFX run speed (0.0–1.0); sent to Pi via 
 BULLSEYE_MAX_SPEED = 0.5     # Global Bullseye max drive speed (0.0–1.0); resets to 50% on every startup
 RUN_SPEED          = 50      # Global run-route speed (10–100 %); persisted across sessions
 PACKET_SAVE        = True    # True = driving delta only sends ly+rx; False = sends all controller fields
-EASTER_EGG_ENABLED = False    # True = show sponsor image every 100th boot; False = always show logo
+EASTER_EGG_ENABLED = True    # True = show sponsor image every 100th boot; False = always show logo
 # ============================================================
 
 import customtkinter as ctk
